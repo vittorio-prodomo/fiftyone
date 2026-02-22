@@ -51,6 +51,7 @@ def import_annotations(
     project_name=None,
     project_id=None,
     task_ids=None,
+    job_ids=None,
     data_path=None,
     label_types=None,
     insert_new=True,
@@ -61,11 +62,11 @@ def import_annotations(
     backend="cvat",
     **kwargs,
 ):
-    """Imports annotations from the specified CVAT project or task(s) into the
-    given sample collection.
+    """Imports annotations from the specified CVAT project, task(s), or job(s)
+    into the given sample collection.
 
-    Provide one of ``project_name``, ``project_id``, or ``task_ids`` to perform
-    an import.
+    Provide one of ``project_name``, ``project_id``, ``task_ids``, or
+    ``job_ids`` to perform an import.
 
     This method can be configured in any of the following three ways:
 
@@ -86,6 +87,7 @@ def import_annotations(
         project_name (None): the name of a CVAT project to import
         project_id (None): the ID of a CVAT project to import
         task_ids (None): a CVAT task ID or iterable of CVAT task IDs to import
+        job_ids (None): a CVAT job ID or iterable of CVAT job IDs to import
         data_path (None): a parameter that defines the correspondence between
             the filenames in CVAT and the filepaths of ``sample_collection``.
             Can be any of the following:
@@ -137,10 +139,13 @@ def import_annotations(
             _allow_mixed=True
         )
 
-    if bool(project_name) + bool(project_id) + bool(task_ids) != 1:
+    if (
+        bool(project_name) + bool(project_id) + bool(task_ids) + bool(job_ids)
+        != 1
+    ):
         raise ValueError(
-            "Exactly one of 'project_name', 'project_id', or 'task_ids' must "
-            "be provided"
+            "Exactly one of 'project_name', 'project_id', 'task_ids', or "
+            "'job_ids' must be provided"
         )
 
     config = foua._parse_config(
@@ -158,6 +163,22 @@ def import_annotations(
 
     if project_id is not None:
         task_ids = api.get_project_tasks(project_id)
+
+    if job_ids is not None:
+        if etau.is_numeric(job_ids):
+            job_ids = [job_ids]
+        else:
+            job_ids = list(job_ids)
+
+        _job_ids_filter = set(job_ids)
+        _task_ids_for_jobs = set()
+        for job_id in job_ids:
+            resp = api.get(api.taskless_job_url(job_id)).json()
+            _task_ids_for_jobs.add(resp["task_id"])
+
+        task_ids = list(_task_ids_for_jobs)
+    else:
+        _job_ids_filter = None
 
     if etau.is_str(task_ids):
         task_ids = [task_ids]
@@ -261,6 +282,7 @@ def import_annotations(
                 label_types,
                 anno_backend,
                 anno_key,
+                _job_ids_filter=_job_ids_filter,
                 **kwargs,
             )
         else:
@@ -281,6 +303,7 @@ def import_annotations(
                     label_types,
                     anno_backend,
                     anno_key,
+                    _job_ids_filter=_job_ids_filter,
                     **kwargs,
                 )
     finally:
@@ -391,6 +414,7 @@ def _download_annotations(
     label_types,
     anno_backend,
     anno_key,
+    _job_ids_filter=None,
     **kwargs,
 ):
     config = anno_backend.config
@@ -419,6 +443,7 @@ def _download_annotations(
         frame_id_map,
         labels_task_map,
         backend=anno_backend,
+        job_ids_filter=_job_ids_filter,
     )
 
     anno_backend.save_run_results(dataset, anno_key, results)
@@ -3386,6 +3411,7 @@ class CVATAnnotationResults(foua.AnnotationResults):
         frame_id_map,
         labels_task_map,
         backend=None,
+        job_ids_filter=None,
     ):
         super().__init__(samples, config, anno_key, id_map, backend=backend)
 
@@ -3395,6 +3421,9 @@ class CVATAnnotationResults(foua.AnnotationResults):
         self.job_ids = job_ids
         self.frame_id_map = frame_id_map
         self.labels_task_map = labels_task_map
+        self.job_ids_filter = (
+            list(job_ids_filter) if job_ids_filter is not None else None
+        )
 
     def launch_editor(self):
         """Launches the CVAT editor and loads the first task for this
@@ -3561,6 +3590,8 @@ class CVATAnnotationResults(foua.AnnotationResults):
             for task_id, frame_map in d["frame_id_map"].items()
         }
 
+        job_ids_filter = d.get("job_ids_filter", None)
+
         return cls(
             samples,
             config,
@@ -3572,6 +3603,7 @@ class CVATAnnotationResults(foua.AnnotationResults):
             job_ids,
             frame_id_map,
             d["labels_task_map"],
+            job_ids_filter=job_ids_filter,
         )
 
 
@@ -4724,6 +4756,10 @@ class CVATAnnotationAPI(foua.AnnotationAPI):
                 )
 
                 job_ids = self._get_job_ids(task_id)
+                if results.job_ids_filter is not None:
+                    job_ids = [
+                        j for j in job_ids if j in results.job_ids_filter
+                    ]
                 for job_id in job_ids:
                     job_resp = self.get(self.job_annotation_url(job_id)).json()
                     all_shapes = job_resp["shapes"]
