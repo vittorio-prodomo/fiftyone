@@ -189,13 +189,13 @@ def import_annotations(
     data_dir = None
     existing_filepaths = sample_collection.values("filepath")
     if data_path is None:
-        data_map = {os.path.basename(f): f for f in existing_filepaths}
+        data_map = _build_suffix_data_map(existing_filepaths)
     elif etau.is_str(data_path) and data_path.endswith(".json"):
         data_map = etas.read_json(data_path)
     elif etau.is_str(data_path):
         if os.path.isdir(data_path):
             data_map = {
-                os.path.basename(f): f
+                os.path.relpath(f, data_path): f
                 for f in etau.list_files(
                     data_path, abs_paths=True, recursive=True
                 )
@@ -203,7 +203,7 @@ def import_annotations(
         else:
             data_map = {}
 
-        data_dir = data_path
+        data_dir = os.path.abspath(data_path)
     else:
         data_map = data_path
 
@@ -309,6 +309,17 @@ def import_annotations(
     finally:
         anno_backend.delete_run(dataset, anno_key)
         api.close()
+
+
+def _build_suffix_data_map(filepaths):
+    data_map = {}
+    for f in filepaths:
+        parts = f.replace(os.sep, "/").split("/")
+        for i in range(1, len(parts) + 1):
+            key = "/".join(parts[-i:])
+            if key not in data_map:
+                data_map[key] = f
+    return data_map
 
 
 def _parse_task_metadata(
