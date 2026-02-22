@@ -18,7 +18,7 @@ import shutil
 import warnings
 
 import numpy as np
-from skimage import measure
+import cv2
 
 import eta.core.image as etai
 import eta.core.serial as etas
@@ -2341,35 +2341,35 @@ def _mask_to_polygons(mask, tolerance):
     if tolerance is None:
         tolerance = 2
 
-    # Pad mask to close contours of shapes which start and end at an edge
-    padded_mask = np.pad(mask, pad_width=1, mode="constant", constant_values=0)
+    if mask.dtype != np.uint8:
+        mask = mask.astype(np.uint8)
 
-    contours = measure.find_contours(padded_mask, 0.5)
-    contours = [c - 1 for c in contours]  # undo padding
+    # Pad mask to close contours of shapes which start and end at an edge
+    padded_mask = cv2.copyMakeBorder(
+        mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0
+    )
+
+    contours, _ = cv2.findContours(
+        padded_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+    )
 
     polygons = []
     for contour in contours:
-        contour = _close_contour(contour)
-        contour = measure.approximate_polygon(contour, tolerance)
+        contour = cv2.approxPolyDP(contour, tolerance, True)
         if len(contour) < 3:
             continue
 
-        contour = np.flip(contour, axis=1)
+        # cv2 contours are (N,1,2) shaped with (x,y) order; flatten
+        # and undo padding offset
+        contour = contour.reshape(-1, 2).astype(np.float64) - 1.0
         segmentation = contour.ravel().tolist()
 
-        # After padding and subtracting 1 there may be -0.5 points
+        # After padding and subtracting 1 there may be negative values
         segmentation = [0 if i < 0 else i for i in segmentation]
 
         polygons.append(segmentation)
 
     return polygons
-
-
-def _close_contour(contour):
-    if not np.array_equal(contour[0], contour[-1]):
-        contour = np.vstack((contour, contour[0]))
-
-    return contour
 
 
 _IMAGE_DOWNLOAD_LINKS = {
