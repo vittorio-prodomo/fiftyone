@@ -344,6 +344,9 @@ export interface BaseState {
   error: boolean | number | AppError;
   destroyed: boolean;
   reloading: boolean;
+  interacting: boolean;
+  committedPan: Coordinates;
+  committedScale: number;
 }
 
 export interface FrameState extends BaseState {

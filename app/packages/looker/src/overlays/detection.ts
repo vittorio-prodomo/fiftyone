@@ -147,6 +147,41 @@ export default class DetectionOverlay<
     }
   }
 
+  drawChrome(ctx: CanvasRenderingContext2D, state: Readonly<State>): void {
+    if (this.label._renderStatus && !this.label.mask) {
+      return;
+    }
+
+    if (this.label.mask && this.label._renderStatus === RENDER_STATUS_PENDING) {
+      return;
+    }
+
+    const doesInstanceMatch =
+      this.label.instance?._id &&
+      isHoveringParticularLabelWithInstanceConfig(this.label.instance._id);
+    const isSelected = this.isSelected(state);
+
+    const { strokeColor, overlayStrokeColor, overlayDash } =
+      getInstanceStrokeStyles({
+        isSelected,
+        getColor: () => this.getColor(state),
+        isHoveringInstance: !!doesInstanceMatch,
+        dashLength: state.dashLength,
+      });
+
+    !state.config.thumbnail && this.drawLabelText(ctx, state);
+
+    if (this.label.convexHull) {
+      this.fillRectFor3d(ctx, state, strokeColor);
+    } else {
+      this.strokeRect(ctx, state, strokeColor);
+    }
+
+    if (overlayStrokeColor && overlayDash) {
+      this.strokeRect(ctx, state, overlayStrokeColor, overlayDash);
+    }
+  }
+
   getMouseDistance(state: Readonly<State>): number {
     const [px, py] = state.pixelCoordinates;
     const [bx, by, bw, bh] = this.getDrawnBBox(state);

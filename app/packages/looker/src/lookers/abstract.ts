@@ -55,6 +55,7 @@ import {
   mergeUpdates,
   snapBox,
 } from "../util";
+import { BitmapCompositor } from "../bitmap-compositor";
 import { ProcessSample } from "../worker";
 import { AsyncLabelsRenderingManager } from "../worker/async-labels-rendering-manager";
 import { LookerUtils } from "./shared";
@@ -116,6 +117,7 @@ export abstract class AbstractLooker<
   private batchMergedUpdates: Partial<State> = {};
   private isBatching = false;
   private isCommittingBatchUpdates = false;
+  private bitmapCompositor = new BitmapCompositor<State>();
 
   public uuid = uuid();
 
@@ -440,6 +442,14 @@ export abstract class AbstractLooker<
           return;
         }
 
+        if (this.state.interacting && !this.state.config.thumbnail) {
+          // CSS transform handles visual update — skip canvas redraw
+          return;
+        }
+        // Commit current pan/scale as baseline for future CSS transforms
+        this.state.committedPan = [...this.state.pan] as Coordinates;
+        this.state.committedScale = this.state.scale;
+
         ctx.lineWidth = this.state.strokeWidth;
         if (!this.state.config.thumbnail) {
           ctx.font = `bold ${this.state.fontSize.toFixed(2)}px Palanquin`;
@@ -475,11 +485,25 @@ export abstract class AbstractLooker<
           h
         );
 
-        ctx.globalAlpha = Math.min(1, this.state.options.alpha / BASE_ALPHA);
-        const numOverlays = this.currentOverlays.length;
+        // Rebuild bitmap composite if needed
+        if (!this.bitmapCompositor.isValid(this.state, this.currentOverlays)) {
+          this.bitmapCompositor.rebuild(this.state, this.currentOverlays);
+        }
 
+        ctx.globalAlpha = Math.min(1, this.state.options.alpha / BASE_ALPHA);
+
+        // Draw composite (1 drawImage instead of N for bitmap overlays)
+        this.bitmapCompositor.drawToCanvas(ctx, this.state);
+
+        // Draw non-bitmap overlays normally + chrome for bitmap overlays
+        const numOverlays = this.currentOverlays.length;
         for (let index = numOverlays - 1; index >= 0; index--) {
-          this.currentOverlays[index].draw(ctx, this.state);
+          const overlay = this.currentOverlays[index];
+          if (this.bitmapCompositor.isBitmapOverlay(overlay, this.state)) {
+            overlay.drawChrome?.(ctx, this.state);
+          } else {
+            overlay.draw(ctx, this.state);
+          }
         }
         ctx.globalAlpha = 1;
 
@@ -760,6 +784,7 @@ export abstract class AbstractLooker<
     this.abortController.abort();
     this.updater({ destroyed: true });
     this.sampleOverlays?.forEach((overlay) => overlay.cleanup?.());
+    this.bitmapCompositor.dispose();
   }
 
   disable() {
@@ -822,6 +847,9 @@ export abstract class AbstractLooker<
       error: null,
       destroyed: false,
       reloading: false,
+      interacting: false,
+      committedPan: [0, 0] as Coordinates,
+      committedScale: 1,
     };
   }
 

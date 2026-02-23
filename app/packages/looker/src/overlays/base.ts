@@ -87,6 +87,7 @@ export const isShown = <State extends BaseState, Label extends RegularLabel>(
 
 export interface Overlay<State extends Partial<BaseState>> {
   draw(ctx: CanvasRenderingContext2D, state: State): void;
+  drawChrome?(ctx: CanvasRenderingContext2D, state: State): void;
   isShown(state: Readonly<State>): boolean;
   field?: string;
   label?: BaseLabel;

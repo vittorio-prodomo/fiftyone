@@ -78,6 +78,7 @@ export class CanvasElement<State extends BaseState> extends BaseElement<
           }
           newState.pan = this.getPan([event.pageX, event.pageY]);
           newState.panning = true;
+          newState.interacting = true;
           return newState;
         }, dispatchTooltipEvent(dispatchEvent));
       },
@@ -102,6 +103,7 @@ export class CanvasElement<State extends BaseState> extends BaseElement<
           event.preventDefault();
           return {
             panning: false,
+            interacting: false,
             pan: this.getPan([event.pageX, event.pageY]),
           };
         });
@@ -145,6 +147,7 @@ export class CanvasElement<State extends BaseState> extends BaseElement<
                   (state) => {
                     return {
                       wheeling: false,
+                      interacting: false,
                       disableOverlays: Boolean(state.playing || state.seeking),
                     };
                   },
@@ -164,6 +167,7 @@ export class CanvasElement<State extends BaseState> extends BaseElement<
                   (<MouseEvent>event).pageY,
                 ],
                 wheeling: true,
+                interacting: true,
                 disableOverlays: true,
               };
             },
@@ -180,17 +184,24 @@ export class CanvasElement<State extends BaseState> extends BaseElement<
     return element;
   }
 
-  renderSelf({
-    loaded,
-    reloading,
-    error,
-    disabled,
-    config: { thumbnail },
-    panning,
-    windowBBox,
-    mouseIsOnOverlay,
-    disableOverlays,
-  }: Readonly<State>) {
+  renderSelf(state: Readonly<State>, _sample?: any) {
+    const {
+      loaded,
+      reloading,
+      error,
+      disabled,
+      config: { thumbnail },
+      panning,
+      windowBBox,
+      mouseIsOnOverlay,
+      disableOverlays,
+      interacting,
+      scale,
+      pan,
+      committedPan,
+      committedScale,
+    } = state;
+
     if (!windowBBox) {
       return this.element;
     }
@@ -204,6 +215,21 @@ export class CanvasElement<State extends BaseState> extends BaseElement<
       const dpr = getDPR();
       this.element.height = height * dpr;
       this.height = height;
+    }
+
+    // CSS transform fast-path during interaction
+    if (interacting && !thumbnail) {
+      const s = scale / committedScale;
+      const dx = pan[0] - s * committedPan[0];
+      const dy = pan[1] - s * committedPan[1];
+      this.element.style.transformOrigin = "0 0";
+      this.element.style.transform = `translate(${dx}px, ${dy}px) scale(${s})`;
+      this.element.style.willChange = "transform";
+    } else {
+      if (this.element.style.transform) {
+        this.element.style.transform = "";
+        this.element.style.willChange = "";
+      }
     }
 
     const cursor = this.cursor;

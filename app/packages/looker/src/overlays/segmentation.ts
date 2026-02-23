@@ -103,6 +103,20 @@ export default class SegmentationOverlay<State extends BaseState>
     }
   }
 
+  drawChrome(ctx: CanvasRenderingContext2D, state: Readonly<State>): void {
+    if (this.isSelected(state)) {
+      strokeCanvasRect(
+        ctx,
+        state,
+        getColor(
+          state.options.coloring.pool,
+          state.options.coloring.seed,
+          this.field
+        )
+      );
+    }
+  }
+
   getMouseDistance(state: Readonly<State>): number {
     if (this.containsPoint(state)) {
       return 0;
