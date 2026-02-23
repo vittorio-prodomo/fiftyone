@@ -204,7 +204,7 @@ def import_annotations(
     data_dir = None
     existing_filepaths = sample_collection.values("filepath")
     if data_path is None:
-        data_map = _build_suffix_data_map(existing_filepaths)
+        data_map = _BasenameLookup(existing_filepaths)
     elif etau.is_str(data_path) and data_path.endswith(".json"):
         data_map = etas.read_json(data_path)
     elif etau.is_str(data_path):
@@ -366,15 +366,39 @@ def import_annotations(
         api.close()
 
 
-def _build_suffix_data_map(filepaths):
-    data_map = {}
-    for f in filepaths:
-        parts = f.replace(os.sep, "/").split("/")
-        for i in range(1, len(parts) + 1):
-            key = "/".join(parts[-i:])
-            if key not in data_map:
-                data_map[key] = f
-    return data_map
+class _BasenameLookup:
+    """Maps CVAT filenames to local filepaths via a basename index.
+
+    Builds a ``{basename: [filepaths]}`` index once, then resolves CVAT
+    filenames in O(1) when basenames are unique or O(k) when *k* paths
+    share the same basename (disambiguated by suffix matching).
+    """
+
+    def __init__(self, filepaths):
+        self._index = defaultdict(list)
+        for f in filepaths:
+            self._index[os.path.basename(f)].append(f)
+
+    def get(self, filename, default=None):
+        basename = filename.replace(os.sep, "/").split("/")[-1]
+        candidates = self._index.get(basename)
+        if not candidates:
+            return default
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # Multiple files share the same basename — use the CVAT relative
+        # path to disambiguate, but only if it contains directory components.
+        # A bare basename (no "/") matches all candidates and is ambiguous.
+        normalized = filename.replace(os.sep, "/")
+        if "/" in normalized:
+            suffix = "/" + normalized
+            for f in candidates:
+                if f.replace(os.sep, "/").endswith(suffix):
+                    return f
+
+        return default
 
 
 def _parse_task_metadata(
