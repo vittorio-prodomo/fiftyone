@@ -60,6 +60,7 @@ def import_annotations(
     occluded_attr=None,
     group_id_attr=None,
     backend="cvat",
+    _fresh_import=False,
     **kwargs,
 ):
     """Imports annotations from the specified CVAT project, task(s), or job(s)
@@ -331,6 +332,7 @@ def import_annotations(
                 anno_backend,
                 anno_key,
                 _job_ids_filter=_job_ids_filter,
+                _fresh_import=_fresh_import,
                 **kwargs,
             )
         else:
@@ -356,6 +358,7 @@ def import_annotations(
                     anno_backend,
                     anno_key,
                     _job_ids_filter=_job_ids_filter,
+                    _fresh_import=_fresh_import,
                     **kwargs,
                 )
     finally:
@@ -533,6 +536,7 @@ def _download_annotations(
     anno_backend,
     anno_key,
     _job_ids_filter=None,
+    _fresh_import=False,
     **kwargs,
 ):
     config = anno_backend.config
@@ -569,13 +573,118 @@ def _download_annotations(
 
     anno_backend.save_run_results(dataset, anno_key, results)
 
-    if label_types is None:
-        unexpected = "keep"
+    if _fresh_import:
+        annotations = anno_backend.download_annotations(results)
+        _bulk_write_annotations(
+            dataset, annotations, label_schema, label_types
+        )
     else:
-        unexpected = label_types
+        if label_types is None:
+            unexpected = "keep"
+        else:
+            unexpected = label_types
 
-    dataset.load_annotations(
-        anno_key, unexpected=unexpected, cleanup=False, **kwargs
+        dataset.load_annotations(
+            anno_key, unexpected=unexpected, cleanup=False, **kwargs
+        )
+
+
+def _bulk_write_annotations(dataset, annotations, label_schema, label_types):
+    """Bulk-write downloaded annotations directly via ``set_values()``.
+
+    This bypasses the generic merge machinery in
+    :func:`fiftyone.utils.annotations.load_annotations` and is only safe
+    when the target label fields are known to be empty (fresh import).
+    """
+    for label_field, label_info in label_schema.items():
+        label_type = label_info.get("type", None)
+        expected_type = foua._RETURN_TYPES_MAP.get(label_type, None)
+        anno_dict = annotations.get(label_field, {})
+
+        for anno_type, annos in anno_dict.items():
+            if anno_type == expected_type:
+                _bulk_set_labels(dataset, label_field, label_type, annos)
+            else:
+                # Replicate skip-label logging from annotations.py
+                num_labels = sum(
+                    len(v) if isinstance(v, dict) else 1
+                    for v in annos.values()
+                )
+                if label_field:
+                    logger.info(
+                        "Skipping %d unexpected label(s) of type '%s' "
+                        "in field '%s'",
+                        num_labels,
+                        anno_type,
+                        label_field,
+                    )
+                else:
+                    logger.info(
+                        "Skipping %d label(s) of type '%s'",
+                        num_labels,
+                        anno_type,
+                    )
+
+                if logger.isEnabledFor(logging.DEBUG):
+                    _fp_map = {
+                        s["id"]: s["filepath"]
+                        for s in dataset.select_fields().iter_samples()
+                    }
+                    for _sid, _labels in annos.items():
+                        _fp = _fp_map.get(_sid, _sid)
+                        if isinstance(_labels, dict):
+                            for _lid, _lbl in _labels.items():
+                                _cls = (
+                                    _lbl.label
+                                    if hasattr(_lbl, "label")
+                                    else type(_lbl).__name__
+                                )
+                                _prov = ""
+                                _tj = getattr(_lbl, "_cvat_task_id", None)
+                                _jj = getattr(_lbl, "_cvat_job_id", None)
+                                _fi = getattr(_lbl, "_cvat_frame_idx", None)
+                                if _tj is not None or _jj is not None:
+                                    parts = []
+                                    if _tj is not None:
+                                        parts.append("task=%s" % _tj)
+                                    if _jj is not None:
+                                        parts.append("job=%s" % _jj)
+                                    if _fi is not None:
+                                        parts.append("frame=%s" % _fi)
+                                    _prov = "  " + "  ".join(parts)
+                                logger.debug(
+                                    "  Skipped: %s  class=%s  " "sample=%s%s",
+                                    anno_type,
+                                    _cls,
+                                    os.path.basename(_fp),
+                                    _prov,
+                                )
+
+
+def _bulk_set_labels(dataset, label_field, label_type, annos):
+    """Write all labels for a single field using ``dataset.set_values()``."""
+    fo_label_type = foua._LABEL_TYPES_MAP[label_type]
+
+    if issubclass(fo_label_type, fol._HasLabelList):
+        list_field = fo_label_type._LABEL_LIST_FIELD
+        values = {
+            sid: fo_label_type(**{list_field: list(labels.values())})
+            for sid, labels in annos.items()
+        }
+    else:
+        values = {
+            sid: next(iter(labels.values()))
+            for sid, labels in annos.items()
+            if labels
+        }
+
+    logger.info("Bulk-writing labels to field '%s'...", label_field)
+    t = time.monotonic()
+    dataset.set_values(label_field, values, key_field="id")
+    logger.info(
+        "Bulk write to '%s' complete (%.1fs)",
+        label_field,
+        time.monotonic() - t,
     )
 
 
