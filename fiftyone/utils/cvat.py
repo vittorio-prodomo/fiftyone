@@ -148,6 +148,8 @@ def import_annotations(
             "'job_ids' must be provided"
         )
 
+    _t0 = time.monotonic()
+
     config = foua._parse_config(
         backend,
         None,
@@ -193,6 +195,10 @@ def import_annotations(
     else:
         task_ids = list(task_ids)
 
+    logger.info(
+        "Resolved %d task(s) in %.1fs", len(task_ids), time.monotonic() - _t0
+    )
+
     # Build mapping from CVAT filenames to local filepaths
     data_dir = None
     existing_filepaths = sample_collection.values("filepath")
@@ -216,6 +222,7 @@ def import_annotations(
         data_map = data_path
 
     # Determine what filepaths we have annotations for
+    _t1 = time.monotonic()
     cvat_id_map = {}
     task_filepaths = []
     ignored_filenames = []
@@ -237,6 +244,13 @@ def import_annotations(
             download_media=download_media,
             frame_ranges=frame_ranges,
         )
+
+    logger.info(
+        "Matched %d file(s) across %d task(s) in %.1fs",
+        len(task_filepaths),
+        len(task_ids),
+        time.monotonic() - _t1,
+    )
 
     # Download media from CVAT, if requested
     if download_tasks:
@@ -261,7 +275,13 @@ def import_annotations(
     # Insert samples for new filepaths, if necessary and we're allowed to
     if new_filepaths:
         if insert_new:
+            _t2 = time.monotonic()
             dataset.add_samples([Sample(filepath=fp) for fp in new_filepaths])
+            logger.info(
+                "Inserted %d new sample(s) in %.1fs",
+                len(new_filepaths),
+                time.monotonic() - _t2,
+            )
         else:
             logger.warning(
                 "Ignoring annotations for %d filepaths (eg %s) that do not "
@@ -3488,8 +3508,9 @@ class CVATBackend(foua.AnnotationBackend):
         api = self.connect_to_api()
 
         logger.info("Downloading labels from CVAT...")
+        _t = time.monotonic()
         annotations = api.download_annotations(results)
-        logger.info("Download complete")
+        logger.info("Download complete (%.1fs)", time.monotonic() - _t)
 
         return annotations
 
@@ -4833,6 +4854,7 @@ class CVATAnnotationAPI(foua.AnnotationAPI):
 
         with fou.ProgressBar(**pb_kwargs) as pb:
             for task_id in pb(task_ids):
+                _task_t0 = time.monotonic()
                 if not self.task_exists(task_id):
                     deleted_tasks.append(task_id)
                     logger.warning(
@@ -4862,6 +4884,7 @@ class CVATAnnotationAPI(foua.AnnotationAPI):
                         j for j in job_ids if j in results.job_ids_filter
                     ]
                 for job_id in job_ids:
+                    _job_t0 = time.monotonic()
                     job_resp = self.get(self.job_annotation_url(job_id)).json()
                     all_shapes = job_resp["shapes"]
                     all_tags = job_resp["tags"]
@@ -5032,6 +5055,19 @@ class CVATAnnotationAPI(foua.AnnotationAPI):
                         annotations = self._merge_results(
                             annotations, {label_field: label_field_results}
                         )
+
+                    logger.info(
+                        "  Job %d: fetched & parsed annotations in %.1fs",
+                        job_id,
+                        time.monotonic() - _job_t0,
+                    )
+
+                logger.info(
+                    "Task %d: processed %d job(s) in %.1fs",
+                    task_id,
+                    len(job_ids),
+                    time.monotonic() - _task_t0,
+                )
 
         if deleted_tasks:
             results._forget_tasks(deleted_tasks)
