@@ -51,6 +51,7 @@ def import_annotations(
     project_name=None,
     project_id=None,
     task_ids=None,
+    job_ids=None,
     data_path=None,
     label_types=None,
     insert_new=True,
@@ -137,10 +138,14 @@ def import_annotations(
             _allow_mixed=True
         )
 
-    if bool(project_name) + bool(project_id) + bool(task_ids) != 1:
+    n_sources = (
+        bool(project_name) + bool(project_id)
+        + bool(task_ids) + bool(job_ids)
+    )
+    if n_sources != 1:
         raise ValueError(
-            "Exactly one of 'project_name', 'project_id', or 'task_ids' must "
-            "be provided"
+            "Exactly one of 'project_name', 'project_id', 'task_ids', or "
+            "'job_ids' must be provided"
         )
 
     config = foua._parse_config(
@@ -158,6 +163,30 @@ def import_annotations(
 
     if project_id is not None:
         task_ids = api.get_project_tasks(project_id)
+
+    if job_ids is not None:
+        if etau.is_numeric(job_ids):
+            job_ids = [job_ids]
+        else:
+            job_ids = list(job_ids)
+
+        _job_ids_filter = set(job_ids)
+        _task_ids_for_jobs = set()
+        _job_frame_ranges = defaultdict(
+            list
+        )  # task_id -> [(start, stop), ...]
+        for job_id in job_ids:
+            resp = api.get(api.taskless_job_url(job_id)).json()
+            tid = resp["task_id"]
+            _task_ids_for_jobs.add(tid)
+            _job_frame_ranges[tid].append(
+                (resp["start_frame"], resp["stop_frame"])
+            )
+
+        task_ids = list(_task_ids_for_jobs)
+    else:
+        _job_ids_filter = None
+        _job_frame_ranges = None
 
     if etau.is_str(task_ids):
         task_ids = [task_ids]
@@ -192,6 +221,11 @@ def import_annotations(
     ignored_filenames = []
     download_tasks = []
     for task_id in task_ids:
+        frame_ranges = (
+            _job_frame_ranges[task_id]
+            if _job_frame_ranges is not None
+            else None
+        )
         cvat_id_map[task_id] = _parse_task_metadata(
             api,
             task_id,
@@ -201,6 +235,7 @@ def import_annotations(
             download_tasks,
             data_dir=data_dir,
             download_media=download_media,
+            frame_ranges=frame_ranges,
         )
 
     # Download media from CVAT, if requested
@@ -242,6 +277,16 @@ def import_annotations(
     anno_key = "tmp_" + str(ObjectId())
     anno_backend.register_run(dataset, anno_key, overwrite=False)
 
+    # When the caller specifies a single expected label type we inject it
+    # into the label schema so that _parse_annotation() can route mask
+    # shapes to the correct bucket (polylines, segmentation, etc.) instead
+    # of always falling back to detections.
+    _expected_type = None
+    if isinstance(label_types, list) and len(label_types) == 1:
+        _expected_type = label_types[0]
+    elif isinstance(label_types, dict) and len(label_types) == 1:
+        _expected_type = next(iter(label_types.keys()))
+
     # Download annotations
     try:
         if project_id is not None:
@@ -252,6 +297,10 @@ def import_annotations(
                 occluded_attr=occluded_attr,
                 group_id_attr=group_id_attr,
             )
+
+            if _expected_type and None in label_schema:
+                label_schema[None]["type"] = _expected_type
+                _rename_none_key(label_schema, _expected_type)
 
             _download_annotations(
                 dataset,
@@ -272,6 +321,10 @@ def import_annotations(
                     occluded_attr=occluded_attr,
                     group_id_attr=group_id_attr,
                 )
+
+                if _expected_type and None in label_schema:
+                    label_schema[None]["type"] = _expected_type
+                    _rename_none_key(label_schema, _expected_type)
 
                 _download_annotations(
                     dataset,
@@ -394,14 +447,25 @@ def _parse_task_metadata(
     download_tasks,
     data_dir=None,
     download_media=False,
+    frame_ranges=None,
 ):
     resp = api.get(api.task_data_meta_url(task_id)).json()
     start_frame = resp.get("start_frame", None)
     stop_frame = resp.get("stop_frame", None)
     chunk_size = resp.get("chunk_size", None)
 
+    # When importing specific jobs, only include frames that fall within
+    # the requested job ranges.
+    if frame_ranges is not None:
+        _in_range = lambda fid: any(lo <= fid <= hi for lo, hi in frame_ranges)
+    else:
+        _in_range = lambda fid: True
+
     cvat_id_map = {}
     for frame_id, frame in enumerate(resp["frames"]):
+        if not _in_range(frame_id):
+            continue
+
         filename = frame["name"]
         filepath = data_map.get(filename, None)
         if download_media:
@@ -480,6 +544,50 @@ def _do_download_media(task):
         etau.write_file(resp._content, filepath)
 
 
+def _stamp_cvat_provenance(label_field_results, task_id, job_id, sid_to_frame):
+    """Stamp every label in *label_field_results* with CVAT provenance.
+
+    Adds private attributes ``_cvat_task_id``, ``_cvat_job_id``, and
+    ``_cvat_frame_idx`` so that downstream logging (e.g. skipped-label
+    diagnostics) can report which CVAT job / task / frame a label came
+    from.
+
+    Args:
+        label_field_results: ``{label_type: {sample_id: {label_id: label}}}``
+        task_id: CVAT task ID.
+        job_id: CVAT job ID.
+        sid_to_frame: ``{sample_id: cvat_frame_idx}`` reverse map.
+    """
+    for _lt, by_sample in label_field_results.items():
+        if not isinstance(by_sample, dict):
+            continue
+        for _sid, labels_or_frames in by_sample.items():
+            cvat_frame = sid_to_frame.get(_sid)
+            if isinstance(labels_or_frames, dict):
+                for _obj in labels_or_frames.values():
+                    if hasattr(_obj, "_cvat_task_id"):
+                        # Already stamped (e.g. Polylines container)
+                        continue
+                    _obj._cvat_task_id = task_id
+                    _obj._cvat_job_id = job_id
+                    _obj._cvat_frame_idx = cvat_frame
+
+
+def _rename_none_key(label_schema, expected_type):
+    """Replace the ``None`` placeholder key in *label_schema* with the
+    canonical field name derived from *expected_type* (e.g. ``"polygons"``
+    → ``"polylines"``).
+
+    The CVAT import path uses ``None`` as a temporary key while building
+    the schema.  When a single ``label_types`` value is requested the key
+    must be replaced with a real field name before the schema reaches
+    ``load_annotations()``, which would otherwise try to create a sample
+    field called ``None``.
+    """
+    field_name = foua._RETURN_TYPES_MAP.get(expected_type, expected_type)
+    label_schema[field_name] = label_schema.pop(None)
+
+
 def _download_annotations(
     dataset,
     task_ids,
@@ -502,7 +610,10 @@ def _download_annotations(
         task_id: _build_sparse_frame_id_map(dataset, cvat_id_map[task_id])
         for task_id in task_ids
     }
-    labels_task_map = {None: task_ids}
+    # Use the single key from label_schema (may be None or a real field
+    # name when a single expected label type was injected).
+    _label_key = next(iter(label_schema))
+    labels_task_map = {_label_key: task_ids}
 
     results = CVATAnnotationResults(
         dataset,
@@ -4973,6 +5084,20 @@ class CVATAnnotationAPI(foua.AnnotationAPI):
                         # need to be converted to their final format
                         self._convert_polylines_to_masks(
                             label_field_results, label_info, frames_metadata
+                        )
+
+                        # Stamp labels with CVAT provenance so that
+                        # downstream logging can report where a label
+                        # came from.
+                        _sid_to_frame = {
+                            fd["sample_id"]: fid
+                            for fid, fd in frame_id_map[task_id].items()
+                        }
+                        _stamp_cvat_provenance(
+                            label_field_results,
+                            task_id,
+                            job_id,
+                            _sid_to_frame,
                         )
 
                         annotations = self._merge_results(

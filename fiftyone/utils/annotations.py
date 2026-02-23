@@ -1163,15 +1163,64 @@ def load_annotations(
                             progress=progress,
                         )
                 else:
+                    num_labels = sum(
+                        len(v) if isinstance(v, dict) else 1
+                        for v in annos.values()
+                    )
                     if label_field:
                         logger.info(
-                            "Skipping unexpected labels of type '%s' in field "
-                            "'%s'",
+                            "Skipping %d unexpected label(s) of type '%s' "
+                            "in field '%s'",
+                            num_labels,
                             anno_type,
                             label_field,
                         )
                     else:
-                        logger.info("Skipping labels of type '%s'", anno_type)
+                        logger.info(
+                            "Skipping %d label(s) of type '%s'",
+                            num_labels,
+                            anno_type,
+                        )
+
+                    if logger.isEnabledFor(logging.DEBUG):
+                        _fp_map = {
+                            s["id"]: s["filepath"]
+                            for s in dataset.select_fields().iter_samples()
+                        }
+                        for _sid, _labels in annos.items():
+                            _fp = _fp_map.get(_sid, _sid)
+                            if isinstance(_labels, dict):
+                                for _lid, _lbl in _labels.items():
+                                    _cls = (
+                                        _lbl.label
+                                        if hasattr(_lbl, "label")
+                                        else type(_lbl).__name__
+                                    )
+                                    # CVAT provenance (stamped by
+                                    # cvat._stamp_cvat_provenance)
+                                    _prov = ""
+                                    _tj = getattr(_lbl, "_cvat_task_id", None)
+                                    _jj = getattr(_lbl, "_cvat_job_id", None)
+                                    _fi = getattr(
+                                        _lbl, "_cvat_frame_idx", None
+                                    )
+                                    if _tj is not None or _jj is not None:
+                                        parts = []
+                                        if _tj is not None:
+                                            parts.append("task=%s" % _tj)
+                                        if _jj is not None:
+                                            parts.append("job=%s" % _jj)
+                                        if _fi is not None:
+                                            parts.append("frame=%s" % _fi)
+                                        _prov = "  " + "  ".join(parts)
+                                    logger.debug(
+                                        "  Skipped: %s  class=%s  "
+                                        "sample=%s%s",
+                                        anno_type,
+                                        _cls,
+                                        os.path.basename(_fp),
+                                        _prov,
+                                    )
 
                     if unexpected == "return":
                         if is_clips_view:
