@@ -2193,9 +2193,7 @@ def _get_polygons_for_segmentation(segmentation, frame_size, tolerance):
 
     rel_points = []
     for apoints in abs_points:
-        rel_points.append(
-            [(x / width, y / height) for x, y, in _pairwise(apoints)]
-        )
+        rel_points.append([(x / width, y / height) for x, y in apoints])
 
     return rel_points
 
@@ -2285,7 +2283,11 @@ def _instance_to_coco_segmentation(
     if detection.get_attribute_value(iscrowd, None):
         return _mask_to_rle(mask)
 
-    return _mask_to_polygons(mask, tolerance)
+    # COCO JSON expects flat [x1, y1, x2, y2, ...] lists
+    return [
+        [coord for x, y in poly for coord in (x, y)]
+        for poly in _mask_to_polygons(mask, tolerance)
+    ]
 
 
 def _make_coco_keypoints(keypoint, frame_size):
@@ -2337,7 +2339,119 @@ def _mask_to_rle(mask):
     return {"counts": counts, "size": list(mask.shape)}
 
 
+def _group_contours(contours, hierarchy):
+    """Groups outer contours with their child holes.
+
+    Uses the two-level hierarchy from ``cv2.RETR_CCOMP``: outer contours
+    have ``parent == -1``, their child holes are linked via
+    ``first_child`` / ``next_sibling``.
+
+    Returns:
+        list of ``(outer_contour, [hole_contours])`` tuples
+    """
+    if hierarchy is None:
+        return [(c, []) for c in contours if len(c) >= 3]
+
+    h = hierarchy[0]
+    groups = []
+
+    for i, c in enumerate(contours):
+        if len(c) < 3:
+            continue
+        if h[i][3] != -1:
+            continue  # skip holes; picked up via their parent
+
+        holes = []
+        child_idx = h[i][2]  # first child
+        while child_idx != -1:
+            if len(contours[child_idx]) >= 3:
+                holes.append(contours[child_idx])
+            child_idx = h[child_idx][0]  # next sibling
+        groups.append((c, holes))
+
+    return groups
+
+
+def _bridge_holes(outer_pts, holes):
+    """Bridges holes into an outer polygon via zero-width seams.
+
+    Walks the outer boundary and, at each hole's closest point on the
+    outer boundary, makes a detour: bridge into the hole, trace the
+    hole boundary in reverse, bridge back, and continue.
+
+    Args:
+        outer_pts: list of ``[x, y]`` pairs for the outer contour
+        holes: list of hole contours (each an ``(N, 1, 2)`` numpy array)
+
+    Returns:
+        list of ``[x, y]`` pairs with holes spliced in
+    """
+    n_outer = len(outer_pts)
+
+    # For each hole, find the closest point pair to the outer boundary
+    hole_info = []
+    for hole in holes:
+        hole_pts = hole.squeeze().tolist()
+        if len(hole_pts) < 3:
+            continue
+
+        best_dist = float("inf")
+        oi, hi = 0, 0
+        for i, op in enumerate(outer_pts):
+            for j, hp in enumerate(hole_pts):
+                d = (hp[0] - op[0]) ** 2 + (hp[1] - op[1]) ** 2
+                if d < best_dist:
+                    best_dist = d
+                    oi, hi = i, j
+
+        hole_info.append((oi, hi, hole_pts))
+
+    if not hole_info:
+        return list(outer_pts)
+
+    # Sort holes by their insertion point along the outer boundary
+    hole_info.sort(key=lambda x: x[0])
+
+    # Walk the outer boundary, splicing in hole detours
+    result = []
+    outer_idx = 0
+
+    for oi, hi, hole_pts in hole_info:
+        # Trace outer from current position up to and including bridge point
+        while outer_idx <= oi:
+            result.append(outer_pts[outer_idx])
+            outer_idx += 1
+
+        # Detour: trace hole reversed (full ring back to entry point)
+        n_hole = len(hole_pts)
+        for k in range(n_hole + 1):
+            result.append(hole_pts[(hi - k) % n_hole])
+
+        # Bridge back to the outer departure point (zero-width)
+        result.append(outer_pts[oi])
+
+    # Emit remaining outer vertices after the last hole
+    while outer_idx < n_outer:
+        result.append(outer_pts[outer_idx])
+        outer_idx += 1
+
+    return result
+
+
 def _mask_to_polygons(mask, tolerance):
+    """Converts a binary mask to a list of polygons with hole bridging.
+
+    Uses ``cv2.RETR_CCOMP`` to recover the two-level contour hierarchy,
+    groups outer contours with their holes, and bridges holes into their
+    parent contour via zero-width seams.
+
+    Args:
+        mask: a binary mask array
+        tolerance: contour approximation tolerance for ``cv2.approxPolyDP``
+
+    Returns:
+        list of polygons, where each polygon is a list of ``(x, y)`` tuples
+    """
     if tolerance is None:
         tolerance = 2
 
@@ -2349,25 +2463,44 @@ def _mask_to_polygons(mask, tolerance):
         mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0
     )
 
-    contours, _ = cv2.findContours(
-        padded_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+    contours, hierarchy = cv2.findContours(
+        padded_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
     )
 
+    groups = _group_contours(contours, hierarchy)
+
+    # Sort by top-left corner (min-y then min-x) to match the raster-scan
+    # order that skimage.measure.find_contours produced
+    groups.sort(key=lambda g: (g[0][:, :, 1].min(), g[0][:, :, 0].min()))
+
     polygons = []
-    for contour in contours:
-        contour = cv2.approxPolyDP(contour, tolerance, True)
-        if len(contour) < 3:
+    for outer, holes in groups:
+        outer = cv2.approxPolyDP(outer, tolerance, True)
+        if len(outer) < 3:
             continue
 
-        # cv2 contours are (N,1,2) shaped with (x,y) order; flatten
-        # and undo padding offset
-        contour = contour.reshape(-1, 2).astype(np.float64) - 1.0
-        segmentation = contour.ravel().tolist()
+        # Undo padding offset and clamp to >= 0
+        outer_pts = np.maximum(
+            outer.reshape(-1, 2).astype(np.float64) - 1.0, 0.0
+        ).tolist()
 
-        # After padding and subtracting 1 there may be negative values
-        segmentation = [0 if i < 0 else i for i in segmentation]
+        approx_holes = []
+        for hole in holes:
+            hole = cv2.approxPolyDP(hole, tolerance, True)
+            if len(hole) < 3:
+                continue
 
-        polygons.append(segmentation)
+            hole = np.maximum(
+                hole.reshape(-1, 2).astype(np.float64) - 1.0, 0.0
+            )
+            approx_holes.append(hole)
+
+        if approx_holes:
+            outer_pts = _bridge_holes(
+                outer_pts, [h.reshape(-1, 1, 2) for h in approx_holes]
+            )
+
+        polygons.append([(x, y) for x, y in outer_pts])
 
     return polygons
 
