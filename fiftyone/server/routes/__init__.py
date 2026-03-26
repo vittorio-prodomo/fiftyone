@@ -19,7 +19,7 @@ from .frames import Frames
 from .geo import GeoPoints
 from .get_similar_labels_frames import GetSimilarLabelsFrameCollection
 from .groups import GroupsRoutes
-from .media import Media
+from .media import Media, MediaDownload
 from .plugins import Plugins
 from .sample import SampleRoutes
 from .screenshot import Screenshot
@@ -43,6 +43,7 @@ routes = (
         ("/fiftyone", FiftyOne),
         ("/frames", Frames),
         ("/geo", GeoPoints),
+        ("/media/download", MediaDownload),
         ("/media", Media),
         ("/plugins", Plugins),
         ("/sort", Sort),

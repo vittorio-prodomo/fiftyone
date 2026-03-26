@@ -5,7 +5,7 @@ import { DEFAULT_FRAME_OPTIONS, FrameState } from "../state";
 import { AbstractLooker } from "./abstract";
 import { LookerUtils } from "./shared";
 
-import { zoomToContent } from "../zoom";
+import { filterOverlaysForZoom, zoomToContent } from "../zoom";
 
 export class FrameLooker extends AbstractLooker<FrameState> {
   getElements(config) {
@@ -38,7 +38,8 @@ export class FrameLooker extends AbstractLooker<FrameState> {
     let scale = 1;
 
     if (state.options.zoom) {
-      const zoomState = zoomToContent(state, overlays);
+      const filtered = filterOverlaysForZoom(state.config.view, overlays);
+      const zoomState = zoomToContent(state, filtered);
       pan = zoomState.pan;
       scale = zoomState.scale;
     }
@@ -59,7 +60,11 @@ export class FrameLooker extends AbstractLooker<FrameState> {
       LookerUtils.toggleZoom(this.state, this.currentOverlays);
     } else if (this.state.setZoom && this.state.overlaysPrepared) {
       if (this.state.options.zoom) {
-        this.state = zoomToContent(this.state, this.pluckedOverlays);
+        const filtered = filterOverlaysForZoom(
+          this.state.config.view,
+          this.pluckedOverlays
+        );
+        this.state = zoomToContent(this.state, filtered);
       } else {
         this.state.pan = [0, 0];
         this.state.scale = 1;

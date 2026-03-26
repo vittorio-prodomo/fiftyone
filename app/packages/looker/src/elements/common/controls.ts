@@ -4,6 +4,7 @@
 
 import {
   crop,
+  download as downloadIcon,
   help as helpIcon,
   json as jsonIcon,
   minus,
@@ -16,6 +17,7 @@ import { BaseState } from "../../state";
 import { BaseElement, Events } from "../base";
 import {
   cropToContent,
+  downloadMedia,
   help,
   json,
   settings,
@@ -340,5 +342,51 @@ export class JSONButtonElement<
     }
 
     return this.element;
+  }
+}
+
+export class DownloadButtonElement<
+  State extends BaseState
+> extends BaseElement<State> {
+  private spinning = false;
+  private timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  getEvents(): Events<State> {
+    return {
+      click: ({ event, update, dispatchEvent }) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (this.spinning) return;
+        downloadMedia.action(update, dispatchEvent);
+        this.setSpinning();
+      },
+    };
+  }
+
+  createHTMLElement() {
+    const element = document.createElement("div");
+    element.classList.add(lookerClickable);
+    element.style.padding = "2px";
+    element.style.display = "flex";
+    element.title = `${downloadMedia.title} (${downloadMedia.shortcut})`;
+    element.style.gridArea = "2 / 12 / 2 / 12";
+    element.appendChild(downloadIcon.cloneNode(true));
+    return element;
+  }
+
+  renderSelf() {
+    return this.element;
+  }
+
+  private setSpinning() {
+    this.spinning = true;
+    this.element.style.opacity = "0.5";
+    this.element.style.cursor = "wait";
+    if (this.timeoutId) clearTimeout(this.timeoutId);
+    this.timeoutId = setTimeout(() => {
+      this.spinning = false;
+      this.element.style.opacity = "1";
+      this.element.style.cursor = "pointer";
+    }, 2000);
   }
 }

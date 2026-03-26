@@ -247,6 +247,7 @@ from .core.stages import (
     SortBySimilarity,
     Take,
     ToPatches,
+    ToTiles,
     ToEvaluationPatches,
     ToClips,
     ToTrajectories,

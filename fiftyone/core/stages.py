@@ -8240,6 +8240,255 @@ class ToPatches(ViewStage):
         ]
 
 
+class ToTiles(ViewStage):
+    """Creates a view that contains one sample per tile of each image in a
+    collection.
+
+    A regular grid of :class:`fiftyone.core.labels.Detection` objects is
+    generated for each sample and stored in a temporary ``tile_regions``
+    field. The view is then created by converting these detections into
+    patches via :meth:`fiftyone.core.patches.make_patches_dataset`.
+
+    Samples **must** have their
+    :class:`fiftyone.core.metadata.ImageMetadata` populated.
+
+    By default, all other fields are included in the returned view (unlike
+    :class:`ToPatches`, which defaults to ``None``).
+
+    A ``sample_id`` field will be added that records the sample ID from which
+    each tile was taken.
+
+    Examples::
+
+        import fiftyone as fo
+
+        dataset = fo.Dataset()
+        dataset.add_sample(
+            fo.Sample(
+                filepath="image.png",
+                metadata=fo.ImageMetadata(width=1280, height=1280),
+            )
+        )
+
+        #
+        # Create a view containing 640x640 tiles
+        #
+
+        stage = fo.ToTiles(tile_size=(640, 640))
+        view = dataset.add_stage(stage)
+        print(view)
+
+    Args:
+        tile_size: a ``(width, height)`` tuple specifying the tile size in
+            pixels
+        overlap (0): overlap between adjacent tiles. Values >= 1 are
+            interpreted as pixels; values in [0, 1) are interpreted as
+            fractions of the tile size
+        min_coverage (0.0): minimum fraction of tile area that must lie
+            within the image for edge tiles to be included
+        config (None): an optional dict of keyword arguments for
+            :meth:`fiftyone.core.patches.make_patches_dataset` specifying
+            how to perform the conversion
+        **kwargs: optional keyword arguments for
+            :meth:`fiftyone.core.patches.make_patches_dataset` specifying
+            how to perform the conversion
+    """
+
+    _TILE_FIELD = "tile_regions"
+
+    def __init__(
+        self,
+        tile_size,
+        overlap=0,
+        other_fields=True,
+        min_coverage=0.0,
+        config=None,
+        _state=None,
+        **kwargs,
+    ):
+        if kwargs:
+            if config is None:
+                config = kwargs
+            else:
+                config.update(kwargs)
+
+        self._tile_size = tile_size
+        self._overlap = overlap
+        self._other_fields = other_fields
+        self._min_coverage = min_coverage
+        self._config = config
+        self._state = _state
+
+    @property
+    def has_view(self):
+        return True
+
+    @property
+    def field(self):
+        """The patches field used for the tile regions."""
+        return self._TILE_FIELD
+
+    @property
+    def tile_size(self):
+        """The ``(width, height)`` tile size in pixels."""
+        return self._tile_size
+
+    @property
+    def overlap(self):
+        """The tile overlap."""
+        return self._overlap
+
+    @property
+    def other_fields(self):
+        """Controls which other fields are included."""
+        return self._other_fields
+
+    @property
+    def min_coverage(self):
+        """The minimum tile coverage."""
+        return self._min_coverage
+
+    @property
+    def config(self):
+        """Parameters specifying how to perform the conversion."""
+        return self._config
+
+    def load_view(self, sample_collection, saved_view=False, reload=False):
+        from fiftyone.core.tiles import compute_tile_detections
+
+        tile_w, tile_h = self._tile_size
+
+        state = {
+            "dataset_id": str(sample_collection._root_dataset._doc.id),
+            "stages": sample_collection.view()._serialize(include_uuids=False),
+            "tile_size": list(self._tile_size),
+            "overlap": self._overlap,
+            "other_fields": self._other_fields,
+            "min_coverage": self._min_coverage,
+            "config": self._config,
+        }
+
+        last_state = deepcopy(self._state)
+        if last_state is not None:
+            name = last_state.pop("name", None)
+        else:
+            name = None
+
+        try:
+            last_dataset = fod.load_dataset(name, reload=True)
+        except:
+            last_dataset = None
+
+        if (
+            reload
+            or last_dataset is None
+            or (state != last_state and not saved_view)
+        ):
+            # Compute tile detections for each sample
+            root_dataset = sample_collection._root_dataset
+            tile_field = self._TILE_FIELD
+
+            # Pre-validate metadata before writing any tile fields
+            missing = sample_collection.exists("metadata", False)
+            if len(missing) > 0:
+                raise ValueError(
+                    "Found %d sample(s) without metadata. You must "
+                    "run `dataset.compute_metadata()` before calling "
+                    "`to_tiles()`" % len(missing)
+                )
+
+            for sample in sample_collection.iter_samples(
+                autosave=True, progress=True
+            ):
+                dets = compute_tile_detections(
+                    sample.metadata.width,
+                    sample.metadata.height,
+                    tile_w,
+                    tile_h,
+                    overlap=self._overlap,
+                    min_coverage=self._min_coverage,
+                )
+                sample[tile_field] = fol.Detections(detections=dets)
+
+            kwargs = deepcopy(self._config) or {}
+            kwargs["other_fields"] = (
+                None if self._other_fields is False else self._other_fields
+            )
+
+            if reload and last_dataset is not None:
+                kwargs["include_indexes"] = last_dataset
+
+            patches_dataset = fop.make_patches_dataset(
+                sample_collection,
+                tile_field,
+                _generated=True,
+                **kwargs,
+            )
+
+            if name is not None and (saved_view or state == last_state):
+                if last_dataset is not None:
+                    last_dataset._delete()
+
+                patches_dataset.name = name
+
+            # Clean up the temporary tile field from the source dataset
+            try:
+                root_dataset.delete_sample_field(tile_field)
+            except Exception:
+                pass
+        else:
+            patches_dataset = last_dataset
+
+        state["name"] = patches_dataset.name
+        self._state = state
+
+        return fop.PatchesView(sample_collection, self, patches_dataset)
+
+    def _kwargs(self):
+        return [
+            ["tile_size", self._tile_size],
+            ["overlap", self._overlap],
+            ["other_fields", self._other_fields],
+            ["min_coverage", self._min_coverage],
+            ["config", self._config],
+            ["_state", self._state],
+        ]
+
+    @classmethod
+    def _params(self):
+        return [
+            {
+                "name": "tile_size",
+                "type": "list<int>",
+                "placeholder": "tile size (width, height)",
+            },
+            {
+                "name": "overlap",
+                "type": "int|float",
+                "default": "0",
+                "placeholder": "overlap (default=0)",
+            },
+            {
+                "name": "other_fields",
+                "type": "NoneType|bool|list<str>",
+                "default": "True",
+            },
+            {
+                "name": "min_coverage",
+                "type": "float",
+                "default": "0.0",
+                "placeholder": "min coverage (default=0.0)",
+            },
+            {
+                "name": "config",
+                "type": "NoneType|json",
+                "default": "None",
+                "placeholder": "config (default=None)",
+            },
+            {"name": "_state", "type": "NoneType|json", "default": "None"},
+        ]
+
+
 class ToEvaluationPatches(ViewStage):
     """Creates a view based on the results of the evaluation with the given key
     that contains one sample for each true positive, false positive, and false
@@ -9325,6 +9574,7 @@ _STAGES = [
     SortBySimilarity,
     Take,
     ToPatches,
+    ToTiles,
     ToEvaluationPatches,
     ToClips,
     ToTrajectories,

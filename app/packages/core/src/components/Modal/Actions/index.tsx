@@ -15,10 +15,11 @@ import ToggleSidebar from "../../Actions/ToggleSidebar";
 import { useModalContext } from "../hooks";
 import GroupVisibility from "./GroupVisibility";
 import HiddenLabels from "./HiddenLabels";
+import Download from "./Download";
 import ToggleFullscreen from "./ToggleFullscreen";
 import { useAtomValue } from "jotai";
 import { EXPLORE, modalMode } from "@fiftyone/state";
- 
+
 const MODAL_ACTION_BAR_HANDLE_CLASS = "fo-modal-action-bar-handle";
 
 const Container = styled.div<{ $isFullScreen: boolean }>`
@@ -102,13 +103,14 @@ export default () => {
       <Container $isFullScreen={isFullScreen}>
         <DragActionsRow />
         <HiddenLabels modal />
-        { mode === EXPLORE && <Selected modal lookerRef={activeLookerRef} /> }
+        {mode === EXPLORE && <Selected modal lookerRef={activeLookerRef} />}
         <ColorScheme modal />
-        { mode === EXPLORE && <Tag modal lookerRef={activeLookerRef} />}
+        {mode === EXPLORE && <Tag modal lookerRef={activeLookerRef} />}
         <Options modal />
         {isGroup && <GroupVisibility />}
         <BrowseOperations modal />
         <OperatorPlacements modal place={types.Places.SAMPLES_VIEWER_ACTIONS} />
+        <Download />
         <ToggleFullscreen />
         <ToggleSidebar modal />
       </Container>

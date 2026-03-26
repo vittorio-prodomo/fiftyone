@@ -8172,6 +8172,91 @@ class SampleCollection(object):
         return self._add_view_stage(fos.ToPatches(field, **kwargs))
 
     @view_stage
+    def to_tiles(
+        self,
+        tile_size,
+        overlap=0,
+        other_fields=True,
+        min_coverage=0.0,
+        **kwargs,
+    ):
+        """Creates a view that contains one sample per tile of each image
+        in the collection.
+
+        A regular grid of :class:`fiftyone.core.labels.Detection` objects is
+        generated for each sample based on the specified tile size and stored
+        internally. The view is then created by converting these detections
+        into patches.
+
+        Samples **must** have their
+        :class:`fiftyone.core.metadata.ImageMetadata` populated.
+
+        By default, all other fields are included in the returned view.
+
+        A ``sample_id`` field will be added that records the sample ID from
+        which each tile was taken.
+
+        Examples::
+
+            import fiftyone as fo
+
+            dataset = fo.Dataset()
+            dataset.add_sample(
+                fo.Sample(
+                    filepath="image.png",
+                    metadata=fo.ImageMetadata(width=1280, height=1280),
+                )
+            )
+
+            #
+            # Create a view containing 640x640 tiles
+            #
+
+            view = dataset.to_tiles(tile_size=(640, 640))
+            print(view)
+
+            #
+            # Create a tiles view with 64px overlap
+            #
+
+            view = dataset.to_tiles(tile_size=(640, 640), overlap=64)
+            print(view)
+
+        Args:
+            tile_size: a ``(width, height)`` tuple specifying the tile size
+                in pixels
+            overlap (0): overlap between adjacent tiles. Values >= 1 are
+                interpreted as pixels; values in [0, 1) are interpreted as
+                fractions of the tile size
+            min_coverage (0.0): minimum fraction of tile area that must lie
+                within the image for edge tiles to be included
+            other_fields (True): controls whether fields other than the tile
+                regions and the default sample fields are included. Can be
+                any of the following:
+
+                -   a field or list of fields to include
+                -   ``True`` to include all other fields
+                -   ``None``/``False`` to include no other fields
+            keep_label_lists (False): whether to store the patches in label
+                list fields of the same type as the input collection rather
+                than using their single label variants
+            include_indexes (False): whether to recreate any custom indexes
+                on the patches view
+
+        Returns:
+            a :class:`fiftyone.core.patches.PatchesView`
+        """
+        return self._add_view_stage(
+            fos.ToTiles(
+                tile_size,
+                overlap=overlap,
+                other_fields=other_fields,
+                min_coverage=min_coverage,
+                **kwargs,
+            )
+        )
+
+    @view_stage
     def to_evaluation_patches(self, eval_key, **kwargs):
         """Creates a view based on the results of the evaluation with the
         given key that contains one sample for each true positive, false

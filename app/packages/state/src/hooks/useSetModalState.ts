@@ -46,6 +46,7 @@ export default () => {
         }),
 
         [atoms.cropToContent(true), atoms.cropToContent(false)],
+        [atoms.zoomPad(true), atoms.zoomPad(false)],
         [atoms.sortFilterResults(true), atoms.sortFilterResults(false)],
         [groupAtoms.groupStatistics(true), groupAtoms.groupStatistics(false)],
         [groupAtoms.modalGroupSlice, groupAtoms.groupSlice],

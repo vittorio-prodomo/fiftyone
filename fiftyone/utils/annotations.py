@@ -11,6 +11,7 @@ import getpass
 import inspect
 import logging
 import os
+import time
 
 from bson import ObjectId
 
@@ -1094,6 +1095,7 @@ def load_annotations(
         for anno_type, annos in anno_dict.items():
             if anno_type == expected_type:
                 # Expected labels
+                _merge_t0 = time.monotonic()
                 if label_type == "scalar":
                     _merge_scalars(
                         dataset,
@@ -1115,6 +1117,12 @@ def load_annotations(
                         class_attrs=class_attrs,
                         progress=progress,
                     )
+                logger.info(
+                    "Merged '%s' labels into field '%s' in %.1fs",
+                    anno_type,
+                    label_field,
+                    time.monotonic() - _merge_t0,
+                )
             else:
                 # Unexpected labels
                 if not allow_additions:

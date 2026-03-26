@@ -105,6 +105,7 @@ export const lookerOptions = selectorFamily<
         ),
         filter: withFilter ? get(pathFilter(modal)) : undefined,
         zoom: get(viewAtoms.isPatchesView) && get(atoms.cropToContent(modal)),
+        zoomPad: get(atoms.zoomPad(modal)),
         timeZone: get(selectors.timeZone),
         showOverlays: modal ? get(atoms.showOverlays) : true,
         alpha: get(atoms.colorScheme).opacity,

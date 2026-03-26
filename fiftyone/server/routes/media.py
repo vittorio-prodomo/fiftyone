@@ -153,3 +153,31 @@ class Media(HTTPEndpoint):
         response.headers["Accept-Ranges"] = "bytes"
         response.headers["Allow"] = "OPTIONS, GET, HEAD"
         return response
+
+
+class MediaDownload(HTTPEndpoint):
+    async def get(
+        self, request: Request
+    ) -> t.Union[FileResponse, StreamingResponse]:
+        path = request.query_params["filepath"]
+
+        try:
+            await anyio.to_thread.run_sync(os.stat, path)
+        except FileNotFoundError:
+            return Response(content="Not found", status_code=404)
+
+        filename = os.path.basename(path)
+        content_type = guess_type(path)[0] or "application/octet-stream"
+
+        response = FileResponse(
+            path,
+            media_type=content_type,
+            filename=filename,
+        )
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers[
+            "Access-Control-Allow-Headers"
+        ] = "Content-Type, Authorization"
+
+        return response

@@ -72,6 +72,11 @@ export const cropToContent = atomFamily<boolean, boolean>({
   default: true,
 });
 
+export const zoomPad = atomFamily<number, boolean>({
+  key: "zoomPad",
+  default: 0.2,
+});
+
 export const fullscreen = atom<boolean>({
   key: "fullscreen",
   default: false,

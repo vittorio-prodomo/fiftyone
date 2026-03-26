@@ -369,6 +369,15 @@ export const selectSample: Control = {
   action: () => null,
 };
 
+export const downloadMedia: Control = {
+  title: "Download",
+  shortcut: "d",
+  detail: "Download the source media file",
+  action: (update, dispatchEvent) => {
+    dispatchEvent("download");
+  },
+};
+
 export const COMMON = {
   escape,
   rotateNext,
@@ -384,6 +393,7 @@ export const COMMON = {
   wheel,
   toggleOverlays,
   selectSample,
+  downloadMedia,
 };
 
 export const COMMON_SHORTCUTS = readActions(COMMON);

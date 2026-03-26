@@ -1,6 +1,7 @@
 import {
   DYNAMIC_EMBEDDED_DOCUMENT_FIELD,
   Schema,
+  Stage,
   getCls,
   getFieldInfo,
 } from "@fiftyone/utilities";
@@ -8,6 +9,7 @@ import { MIN_PIXELS } from "./constants";
 import { POINTS_FROM_FO } from "./overlays";
 import { Overlay } from "./overlays/base";
 import {
+  BaseState,
   BoundingBox,
   Coordinates,
   Dimensions,
@@ -16,6 +18,46 @@ import {
   VideoState,
 } from "./state";
 import { getContainingBox, mergeUpdates, snapBox } from "./util";
+
+const PATCHES_STAGE_CLASSES = [
+  "fiftyone.core.stages.ToPatches",
+  "fiftyone.core.stages.ToEvaluationPatches",
+];
+
+const TILES_STAGE_CLASS = "fiftyone.core.stages.ToTiles";
+const TILES_FIELD = "tile_regions";
+
+/**
+ * Extracts the primary patches field name from view stages.
+ * Returns null if the view is not a patches view.
+ */
+export const getPatchesField = (view: Stage[]): string | null => {
+  for (const stage of view) {
+    if (PATCHES_STAGE_CLASSES.includes(stage._cls)) {
+      const fieldKwarg = stage.kwargs.find(([key]) => key === "field");
+      return (fieldKwarg?.[1] as unknown as string) ?? null;
+    }
+    if (stage._cls === TILES_STAGE_CLASS) {
+      return TILES_FIELD;
+    }
+  }
+  return null;
+};
+
+/**
+ * Filters overlays to only the primary patches field when in a patches view.
+ * Returns all overlays unchanged if not in a patches view.
+ */
+export const filterOverlaysForZoom = <State extends BaseState>(
+  view: Stage[],
+  overlays: Overlay<State>[]
+): Overlay<State>[] => {
+  const patchesField = getPatchesField(view);
+  if (!patchesField) return overlays;
+
+  const filtered = overlays.filter((o) => o.field === patchesField);
+  return filtered.length > 0 ? filtered : overlays;
+};
 
 const adjustBox = (
   [w, h]: Dimensions,

@@ -69,6 +69,18 @@ function useLooker<L extends fos.Lookers>({
   fos.useEventHandler(looker, "reset", () => setReset((c) => !c));
   fos.useEventHandler(looker, "select", fos.useOnSelectLabel());
   fos.useEventHandler(looker, "showOverlays", useShowOverlays());
+  fos.useEventHandler(looker, "download", () => {
+    const mediaSrc = looker.state.config.src;
+    if (!mediaSrc) return;
+
+    const downloadSrc = mediaSrc.replace("/media?", "/media/download?");
+    const a = document.createElement("a");
+    a.href = downloadSrc;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  });
 
   useEffect(() => {
     !initialRef.current && looker.updateOptions(lookerOptions);

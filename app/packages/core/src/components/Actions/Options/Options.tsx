@@ -4,6 +4,7 @@ import {
   TabOption,
   useTheme,
 } from "@fiftyone/components";
+import { Slider } from "@mui/material";
 import * as fos from "@fiftyone/state";
 import { groupStatistics } from "@fiftyone/state";
 import type { RefObject } from "react";
@@ -78,6 +79,38 @@ const Patches = ({ modal }: { modal: boolean }) => {
         name={"Crop to patch"}
         value={crop}
         setValue={(value) => setCrop(value)}
+      />
+    </>
+  );
+};
+
+const ZoomPad = ({ modal }: { modal: boolean }) => {
+  const isPatches = useRecoilValue(fos.isPatchesView);
+  const crop = useRecoilValue(fos.cropToContent(modal));
+  const [zoomPad, setZoomPad] = useRecoilState(fos.zoomPad(modal));
+  const theme = useTheme();
+
+  if (!isPatches || !crop) {
+    return null;
+  }
+
+  return (
+    <>
+      <PopoutSectionTitle>Zoom padding</PopoutSectionTitle>
+      <Slider
+        value={zoomPad}
+        onChange={(_e: Event, value: number | number[]) =>
+          setZoomPad(value as number)
+        }
+        min={0}
+        max={0.5}
+        step={0.05}
+        valueLabelDisplay="auto"
+        valueLabelFormat={(v: number) => v.toFixed(2)}
+        sx={{
+          color: theme.primary.main,
+          margin: "0 0.5rem",
+        }}
       />
     </>
   );
@@ -435,6 +468,7 @@ const Options = ({ modal, anchorRef }: OptionsProps) => {
       )}
       {mode === fos.EXPLORE && <MediaFields modal={modal} />}
       {mode === fos.EXPLORE && <Patches modal={!!modal} />}
+      {mode === fos.EXPLORE && <ZoomPad modal={!!modal} />}
       {mode === fos.EXPLORE && !view?.length && <QueryPerformance />}
       {mode === fos.EXPLORE && <SortFilterResults modal={modal} />}
       {!modal && <Grid />}
