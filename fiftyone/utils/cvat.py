@@ -5066,9 +5066,10 @@ class CVATAnnotationAPI(foua.AnnotationAPI):
                 )
 
                 job_ids = self._get_job_ids(task_id)
-                if results.job_ids_filter is not None:
+                _job_ids_filter = getattr(results, "_job_ids_filter", None)
+                if _job_ids_filter is not None:
                     job_ids = [
-                        j for j in job_ids if j in results.job_ids_filter
+                        j for j in job_ids if j in _job_ids_filter
                     ]
                 label_fields = labels_task_map_rev[task_id]
                 label_types = self._get_return_label_types(
