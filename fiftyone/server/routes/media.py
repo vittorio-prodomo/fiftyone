@@ -6,6 +6,7 @@ FiftyOne Server /media route
 |
 """
 
+import mimetypes
 import os
 import typing as t
 
@@ -21,6 +22,10 @@ from starlette.responses import (
     StreamingResponse,
     guess_type,
 )
+
+# Python < 3.13 ships no .webp mapping and many systems' mime.types lack one,
+# so WebP media would be served as text/plain
+mimetypes.add_type("image/webp", ".webp")
 
 
 async def ranged(
