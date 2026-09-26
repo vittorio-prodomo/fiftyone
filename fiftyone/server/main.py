@@ -13,6 +13,8 @@ import asyncio
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
 import logging
+import signal
+from sse_starlette.sse import AppStatus
 import webbrowser
 
 if os.environ.get("FIFTYONE_DISABLE_SERVICES", False):
@@ -61,7 +63,26 @@ def start_server(
 
         webbrowser.open(url, new=2)
 
-    asyncio.run(serve(app, config), debug=DEBUG_LOGGING)
+    asyncio.run(_serve(config), debug=DEBUG_LOGGING)
+
+
+async def _serve(config):
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # Windows
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
+
+    async def shutdown_trigger():
+        await stop.wait()
+        # sse_starlette only ends its streams on uvicorn's exit signal, and on
+        # Python >= 3.12 hypercorn's shutdown awaits every open connection
+        # (hypercorn#308): without this an open App tab blocks exit forever
+        AppStatus.should_exit = True
+
+    await serve(app, config, shutdown_trigger=shutdown_trigger)
 
 
 if __name__ == "__main__":
