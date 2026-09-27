@@ -223,6 +223,7 @@ def split_subset_view(stages):
         if name in {
             "ToPatches",
             "ToEvaluationPatches",
+            "ToTiles",
             "ToFrames",
             "ToClips",
             "ToTrajectories",

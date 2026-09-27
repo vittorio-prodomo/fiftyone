@@ -231,6 +231,7 @@ const CONVERTED_UNITS: Record<ViewConversion, SelectionUnit> = {
 const CONVERTING_STAGES: Record<string, ViewConversion> = {
   "fiftyone.core.stages.ToPatches": "patches",
   "fiftyone.core.stages.ToEvaluationPatches": "patches",
+  "fiftyone.core.stages.ToTiles": "patches",
   "fiftyone.core.stages.ToFrames": "frames",
   "fiftyone.core.stages.ToClips": "clips",
   "fiftyone.core.stages.ToTrajectories": "clips",

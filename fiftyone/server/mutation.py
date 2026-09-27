@@ -44,6 +44,7 @@ _CONVERSION_STAGES = {
     fos.ToEvaluationPatches,
     fos.ToFrames,
     fos.ToPatches,
+    fos.ToTiles,
     fos.ToTrajectories,
 }
 
