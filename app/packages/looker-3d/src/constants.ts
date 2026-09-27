@@ -16,6 +16,10 @@ export const DRAG_GATE_THRESHOLD_PX = 4;
 
 export const SET_TOP_VIEW_EVENT = "fo-action-set-top-view";
 export const SET_EGO_VIEW_EVENT = "fo-action-set-ego-view";
+/** Fired on `document` once a frame has rendered a programmatic camera look-at. */
+export const CAMERA_LOOK_AT_SETTLED_EVENT = "looker3d-camera-look-at-settled";
+/** Dispatched on `document` once a scene is parsed, its assets loaded and its camera settled. */
+export const SCENE_READY_EVENT = "looker3d-scene-ready";
 export const SET_ZOOM_TO_SELECTED_EVENT = "fo-action-zoom-to-selected";
 
 export const SHADE_BY_INTENSITY = "intensity";
@@ -28,13 +32,20 @@ export const ANNOTATION_CUBOID = "cuboid";
 export const ANNOTATION_POLYLINE = "polyline";
 
 export const DEFAULT_CAMERA_POSITION = () => new Vector3(0, 5, -5);
+export const DEFAULT_SELECTED_CUBOID_CROP_MARGIN = 1.5;
+
+// Tolerance for the point-cloud crop inside-bounds test. Shared by the CPU
+// path (isPointInsidePointCloudCrop) and the GPU shader so they stay in sync;
+// interpolated into GLSL, so keep it a valid float literal.
+export const POINT_CLOUD_CROP_BOUNDS_EPSILON = 1e-6;
+export const UNFOCUSED_LABEL_OPACITY = 0.08;
 
 // Default bounding box when scene bounds cannot be determined
 export const DEFAULT_BOUNDING_BOX = new Box3(
   // min
   new Vector3(-5, -5, -5),
   // max
-  new Vector3(5, 5, 5)
+  new Vector3(5, 5, 5),
 );
 
 export const ACTIONS = [
@@ -55,6 +66,7 @@ export const SHADE_BY_CHOICES: { label: string; value: ShadeBy }[] = [
 export const PANEL_ORDER_VISIBILITY = -1;
 export const PANEL_ORDER_ANIMATIONS = 1;
 export const PANEL_ORDER_PCD_CONTROLS = 1;
+export const PANEL_ORDER_CAMERAS = 2;
 export const PANEL_ORDER_LABELS = 998;
 export const PANEL_ORDER_SCENE_CONTROLS = 999;
 export const PANEL_ORDER_SETTINGS = 1000;
@@ -138,15 +150,16 @@ export const PANEL_IDS = [
  * Get the DOM element ID for a given panel ID.
  * Convention: element ID is `${panelId}-panel`
  */
-export const getPanelElementId = (panelId: typeof PANEL_IDS[number]): string =>
-  `${panelId}-panel`;
+export const getPanelElementId = (
+  panelId: (typeof PANEL_IDS)[number],
+): string => `${panelId}-panel`;
 
 /**
  * Get the CSS grid area name for a side panel ID.
  * Maps "side-top" -> "top", "side-bottom" -> "bottom"
  */
 export const getSidePanelGridArea = (
-  panelId: typeof PANEL_ID_SIDE_TOP | typeof PANEL_ID_SIDE_BOTTOM
+  panelId: typeof PANEL_ID_SIDE_TOP | typeof PANEL_ID_SIDE_BOTTOM,
 ): "top" | "bottom" => panelId.replace("side-", "") as "top" | "bottom";
 
 export const VIEW_TYPE_TOP = "Top";

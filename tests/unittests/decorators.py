@@ -5,14 +5,17 @@ Decorator utils for unit tests.
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 from functools import wraps
 import os
 import platform
 import unittest
+import uuid
 from unittest import mock
 
 import fiftyone as fo
 import fiftyone.core.odm as foo
+import fiftyone.core.tags as fota
 
 
 def drop_datasets(func):
@@ -64,6 +67,27 @@ def drop_collection(collection_name):
         return wrapper
 
     return decorator
+
+
+def isolate_temporal_tags(func):
+    """Decorator that gives a test a temporal tags collection of its own for its
+    duration and drops it afterwards, so the test never reads or writes the
+    tags of a database that is in use.
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        name = "%s_test_%s" % (fota.TAGS_COLLECTION_NAME, uuid.uuid4().hex)
+        with mock.patch.object(fota, "TAGS_COLLECTION_NAME", name):
+            try:
+                return func(*args, **kwargs)
+            finally:
+                foo.get_db_conn().drop_collection(name)
+
+    return wrapper
+
+
+drop_ontologies = drop_collection("ontologies")
 
 
 def skip_windows(func):

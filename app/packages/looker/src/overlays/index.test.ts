@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { EMBEDDED_DOCUMENT_FIELD, type Schema } from "@fiftyone/utilities";
 
 import { RegularLabel } from "./base";
 import DetectionOverlay from "./detection";
@@ -8,21 +9,44 @@ import { getHashLabelColorByInstance } from "./util";
 describe("label overlay processing", () => {
   it("omits undefined labels", () => {
     expect(index.fromLabel(DetectionOverlay)("field", undefined)).toStrictEqual(
-      []
+      [],
     );
   });
 
   it("resolves empty label lists", () => {
     expect(
-      index.fromLabelList(DetectionOverlay, "detections")("field", undefined)
+      index.fromLabelList(DetectionOverlay, "detections")("field", undefined),
     ).toStrictEqual([]);
   });
 
   it("resolves empty object label lists", () => {
     expect(
-      index.fromLabelList(DetectionOverlay, "detections")("field", {})
+      index.fromLabelList(DetectionOverlay, "detections")("field", {}),
     ).toStrictEqual([]);
   });
+
+  it.each(["TemporalDetections", "Classifications"])(
+    "resolves an omitted empty %s list",
+    (type) => {
+      const schema: Schema = {
+        labels: {
+          name: "labels",
+          path: "labels",
+          dbField: null,
+          description: null,
+          info: null,
+          subfield: null,
+          ftype: EMBEDDED_DOCUMENT_FIELD,
+          embeddedDocType: `fiftyone.core.labels.${type}`,
+        },
+      };
+      const { classifications } = index.accumulateOverlays(
+        { labels: { _cls: type } },
+        schema,
+      );
+      expect(classifications).toEqual([["labels", []]]);
+    },
+  );
 
   it("label hash is generated correctly", () => {
     const hashLabelWithIndex0 = getHashLabelColorByInstance({
@@ -50,7 +74,7 @@ describe("label overlay processing", () => {
     expect(hashLabelWithIndex1).toEqual("one-index-label-1-");
     expect(hashLabelWithUndefinedIndex).toEqual("label-no-index.id-no-index");
     expect(hashLabelWithUndefinedIndexUndefinedId).toEqual(
-      "only-label-no-index-no-id"
+      "only-label-no-index-no-id",
     );
   });
 });

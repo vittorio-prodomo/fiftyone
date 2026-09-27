@@ -4,6 +4,10 @@ import { RENDER_STATUS_PENDING } from "@fiftyone/looker/src/worker/shared";
 import type Spotlight from "@fiftyone/spotlight";
 import type { ID } from "@fiftyone/spotlight";
 import * as fos from "@fiftyone/state";
+import {
+  useGridSelectionDataset,
+  useSelectionMembership,
+} from "@fiftyone/state/src/selection";
 import { useCallback, useEffect, useRef } from "react";
 import { useRecoilValue } from "recoil";
 import { useDetectNewActiveLabelFields } from "../Sidebar/useDetectNewActiveLabelFields";
@@ -12,12 +16,12 @@ import type { LookerCache } from "./types";
 export const getOverlays = (entry: fos.Lookers) => {
   // todo: there should be consistency here between video looker and other looker
   return entry instanceof VideoLooker
-    ? entry.pluckedOverlays ?? []
-    : entry.getSampleOverlays() ?? [];
+    ? (entry.pluckedOverlays ?? [])
+    : (entry.getSampleOverlays() ?? []);
 };
 
 export const markTheseOverlaysAsPending = (
-  overlays: ReturnType<typeof getOverlays>
+  overlays: ReturnType<typeof getOverlays>,
 ) => {
   for (const overlay of overlays) {
     markOverlayAsPending(overlay);
@@ -25,7 +29,7 @@ export const markTheseOverlaysAsPending = (
 };
 
 const markOverlayAsPending = (
-  overlay: ReturnType<typeof getOverlays>[number]
+  overlay: ReturnType<typeof getOverlays>[number],
 ) => {
   if (overlay.label) {
     overlay.label = {
@@ -37,7 +41,7 @@ const markOverlayAsPending = (
 
 export const handleNetNewOverlays = (
   entry: fos.Lookers,
-  newFields: string[]
+  newFields: string[],
 ) => {
   if (entry instanceof ImaVidLooker) {
     entry.refreshSample(newFields, entry.frameNumber);
@@ -68,12 +72,15 @@ export const handlePotentiallyStillPendingOverlays = (entry: fos.Lookers) => {
 
 const useItemUpdater = (
   cache: LookerCache,
-  options: ReturnType<typeof fos.useLookerOptions>
+  options: ReturnType<typeof fos.useLookerOptions>,
 ) => {
   const { getNewFields, removeField } = useDetectNewActiveLabelFields({
     modal: false,
   });
   const selected = useRecoilValue(fos.selectedSamples);
+  const { enabled, domainId } = useGridSelectionDataset();
+  const membership = useSelectionMembership(domainId);
+  const style = useRecoilValue(fos.sampleSelectionStyle);
 
   return useCallback(
     (fontSize: number, lastColoringKey: string | null) => {
@@ -85,7 +92,7 @@ const useItemUpdater = (
 
         const thisColoringKey = getColoringKey(
           options.coloring,
-          options.colorscale
+          options.colorscale,
         );
 
         if (lastColoringKey !== thisColoringKey) {
@@ -104,7 +111,7 @@ const useItemUpdater = (
                 o.label?.map_path?.length > 0 ||
                 o.label?.mask ||
                 o.label?.map) &&
-              newFields.includes(o.field)
+              newFields.includes(o.field),
           );
 
           if (newOverlays?.length) {
@@ -115,13 +122,27 @@ const useItemUpdater = (
         // we want to update looker settings, since async manager refs them
         // todo: decouple async manager from looker state and pass options in
         // handleNewOverlays / refreshSample
+        const sampleId = id.description;
+        // A tile reads as selected when any bucket holds it.
+        const isSelected = enabled
+          ? membership.has(sampleId)
+          : selected.has(sampleId);
+        const { selectionType, selectionIcon } = fos.resolveSelectionIcon(
+          selected,
+          style,
+          sampleId,
+          isSelected,
+        );
+
         entry.updateOptions(
           {
             ...options,
             fontSize,
-            selected: selected.has(id.description),
+            selected: isSelected,
+            selectionType,
+            selectionIcon,
           },
-          shouldHardReload
+          shouldHardReload,
         );
 
         if (shouldHardReload) {
@@ -133,7 +154,7 @@ const useItemUpdater = (
         entry.updateOptions({}, shouldHardReload);
       };
     },
-    [cache, getNewFields, options, selected]
+    [cache, getNewFields, options, selected, style, enabled, membership],
   );
 };
 
@@ -155,17 +176,17 @@ export default function useUpdates({
   optionsRef.current = options;
 
   const lastColoringKeyRef = useRef(
-    getColoringKey(options.coloring, options.colorscale)
+    getColoringKey(options.coloring, options.colorscale),
   );
 
   useEffect(() => {
     deferred(() => {
       spotlight?.updateItems(
-        itemUpdater(getFontSize(), lastColoringKeyRef.current)
+        itemUpdater(getFontSize(), lastColoringKeyRef.current),
       );
       lastColoringKeyRef.current = getColoringKey(
         optionsRef.current.coloring,
-        optionsRef.current.colorscale
+        optionsRef.current.colorscale,
       );
       cache.empty();
     });
@@ -179,7 +200,7 @@ export default function useUpdates({
 export const getColoringKey = (
   coloring: Coloring | undefined,
   colorscale: Colorscale | undefined,
-  suffix?: string
+  suffix?: string,
 ) => {
   if (!coloring) {
     return null;

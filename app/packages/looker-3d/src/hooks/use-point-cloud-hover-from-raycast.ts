@@ -4,6 +4,7 @@ import type { BufferGeometry } from "three";
 import { Points, Vector3 } from "three";
 import { useFo3dContext } from "../fo3d/context";
 import { currentHoveredPointAtom } from "../state";
+import type { HoverMetadata } from "../types";
 import { useRaycastResult } from "./use-raycast-result";
 
 interface UsePointCloudHoverFromRaycastProps {
@@ -24,14 +25,14 @@ export const usePointCloudHoverFromRaycast = ({
 }: UsePointCloudHoverFromRaycastProps) => {
   const { pointCloudSettings, setHoverMetadata } = useFo3dContext();
   const [currentHoveredPoint, setCurrentHoveredPoint] = useRecoilState(
-    currentHoveredPointAtom
+    currentHoveredPointAtom,
   );
   const raycastResult = useRaycastResult();
 
   const lastProcessedTimestampRef = useRef<number>(0);
   const isActiveHoverSourceRef = useRef<boolean>(false);
 
-  // This effect processes raycast result when it changes
+  // This effect maps the latest raycast hit to hovered point metadata.
   useEffect(() => {
     if (!pointCloudSettings.enableTooltip) {
       return;
@@ -67,7 +68,7 @@ export const usePointCloudHoverFromRaycast = ({
     // Mark ourselves as the active hover source
     isActiveHoverSourceRef.current = true;
 
-    const md: Record<string, any> = { index: idx };
+    const md: Record<string, unknown> = { index: idx };
 
     if (geometry.hasAttribute("rgb")) {
       const colorAttr = geometry.getAttribute("rgb");
@@ -91,7 +92,7 @@ export const usePointCloudHoverFromRaycast = ({
     setHoverMetadata({
       assetName,
       renderModeDescriptor: shadingMode,
-      attributes: md,
+      attributes: md as HoverMetadata["attributes"],
     });
   }, [
     raycastResult,
@@ -100,9 +101,11 @@ export const usePointCloudHoverFromRaycast = ({
     pointCloudSettings.enableTooltip,
     assetName,
     shadingMode,
+    setCurrentHoveredPoint,
+    setHoverMetadata,
   ]);
 
-  // This effect cleans up marker on unmount
+  // This effect clears hover state when the hook unmounts.
   useEffect(() => {
     return () => {
       if (isActiveHoverSourceRef.current) {

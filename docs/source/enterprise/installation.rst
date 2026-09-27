@@ -59,7 +59,7 @@ private PyPI server as shown below:
    structure as :doc:`fiftyone <../api/fiftyone>`, so any existing scripts you
    built using open source will continue to run after you upgrade!
 
-Next Steps
+Next steps
 __________
 
 After installing the Enterprise Python SDK in your virtual environment, you'll need
@@ -161,11 +161,22 @@ credentials for use by all app users <enterprise-cloud-storage-page>`.
 Cross-origin resource sharing (CORS)
 ____________________________________
 
-If your datasets include cloud-backed
-:ref:`point clouds <point-cloud-datasets>` or
-:ref:`segmentation maps <semantic-segmentation>`, you may need to configure
-cross-origin resource sharing (CORS) for your cloud buckets. Details are
-provided below for each cloud platform.
+We strongly recommend configuring cross-origin resource sharing (CORS) on your
+cloud storage buckets/containers. Most media renders in the App via standard ``<img>``/``<video>``
+elements that do not require CORS, but any media that the App fetches and
+decodes directly in the browser **requires** it, including cloud-backed
+:ref:`point clouds <point-cloud-datasets>`,
+:ref:`segmentation maps <semantic-segmentation>`, in-App annotation, and
+multimodal (MCAP) datasets. Without CORS, these assets fail to load with a
+``No 'Access-Control-Allow-Origin' header is present on the requested resource``
+browser error, even when other media displays correctly in the App.
+
+When configuring CORS, set the allowed origin(s) to the URL(s) from which your
+users access the FiftyOne Enterprise App, and allow the ``GET`` and ``HEAD``
+methods. For media that is read in byte ranges (such as MCAP), also allow the
+``Range`` request header and expose the ``Content-Range``, ``Content-Length``,
+and ``Accept-Ranges`` response headers. Details are provided below for each
+cloud platform.
 
 Browser caching
 _______________
@@ -257,7 +268,7 @@ here is an example configuration:
             "AllowedHeaders": ["*"],
             "AllowedMethods": ["GET", "HEAD"],
             "AllowedOrigins": ["https://fiftyone-enterprise-deployment.yourcompany.com"],
-            "ExposeHeaders": [],
+            "ExposeHeaders": ["Content-Range", "Content-Length", "Accept-Ranges"],
             "MaxAgeSeconds": 86400
         }
     ]
@@ -315,7 +326,7 @@ here is an example configuration:
         {
             "origin": ["https://fiftyone-enterprise-deployment.yourcompany.com"],
             "method": ["GET", "HEAD"],
-            "responseHeader": ["*"],
+            "responseHeader": ["Content-Range", "Content-Length", "Accept-Ranges"],
             "maxAgeSeconds": 3600
         }
     ]
@@ -328,6 +339,9 @@ By default GCP sets the max-age=0 seconds meaning no caching will occur.
 
 Microsoft Azure
 _______________
+
+.. customavailablein::
+    :enterprise_version: 1.2.1
 
 To work with FiftyOne datasets whose media are stored in Azure Storage, you
 simply need to provide
@@ -400,12 +414,26 @@ the following:
 
 .. code-block:: shell
 
+   [default]
+   account_name = ...
+   sas_token = ...
+   alias = ...  # optional
+
+.. code-block:: shell
+
     [default]
     account_name = ...
     client_id = ...
     secret = ...
     tenant = ...
     alias = ...  # optional
+
+.. note::
+
+   File based cloud credentials support interpolation so make sure to escape
+   any special characters if you want their literal version to be used.
+   For example, sas_tokens often contain ``%`` characters that should be escaped as
+   ``%%`` in the .ini file.
 
 When populating samples with Azure Storage filepaths, you can either specify
 paths by their full URL:
@@ -434,6 +462,25 @@ alias:
     you can provide it by setting the
     `AZURE_STORAGE_ACCOUNT_URL` environment variable or by including the
     `account_url` key in your credentials `.ini` file.
+
+If you need to configure CORS on your Azure Blob storage account, you can do so
+at the storage-account level (Blob service) via the Azure portal
+(**Settings > Resource sharing (CORS)**) or the Azure CLI:
+
+.. code-block:: shell
+
+    az storage cors add \
+        --services b \
+        --methods GET HEAD \
+        --origins "https://fiftyone-enterprise-deployment.yourcompany.com" \
+        --allowed-headers "*" \
+        --exposed-headers "Content-Range" "Content-Length" "Accept-Ranges" \
+        --max-age 3600 \
+        --account-name "<account-name>"
+
+See the
+`Azure Storage CORS documentation <https://learn.microsoft.com/en-us/rest/api/storageservices/cross-origin-resource-sharing--cors--support-for-the-azure-storage-services>`_
+for more details.
 
 If you would like to take advantage of browser caching you can
 `specify cache-control headers on Azure blobs <https://learn.microsoft.com/en-us/azure/cdn/cdn-manage-expiration-of-blob-content#setting-cache-control-headers-by-using-azure-powershell>`_.
@@ -550,20 +597,77 @@ Provider names and the class that extra kwargs are passed to:
 
 .. _enterprise-cloud-storage-page:
 
-Cloud storage page
-------------------
+Managed cloud credentials
+-------------------------
 
-Admins can also configure cloud credentials via the Settings > Cloud storage
-page.
+Cloud provider credentials can be managed directly on the Enterprise server.
+Managed credentials are automatically loaded for all matching media requests
+(App, local SDK, Delegated Operators, etc.) and stored encrypted in the
+Enterprise database, eliminating the need for environment variable configuration
+in your deployment.
 
-Credentials configured via this page are stored (encrypted) in the Enterprise
-database, rather than needing to be configured through environment variables in
-your Enterprise deployment.
+Managed credentials can be scoped to be a specific user or user group, or be
+available globally to all users. Any user can configure credentials for their
+own use, while only admins can configure group specific or global credentials.
+
+A managed credential can optionally be restricted to a specific list of bucket(s):
+
+*   If one or more buckets are provided, the credentials are
+    **bucket-specific credentials** that will only be used to read/write media
+    within the specified bucket(s)
+
+*   If no buckets are provided, the credentials are **default credentials**
+    that will be used whenever trying to read/write any media for the provider
+    that does not belong to a bucket with bucket-specific credentials
 
 .. note::
 
-    Any credentials configured via environment variables in your deployment
-    will not be displayed in this page.
+    Bucket-specific credentials are useful in situations where you cannot or
+    do not wish to provide a single set of credentials to cover all buckets
+    that your team plans to use within a given cloud storage provider.
+
+    When providing bucket-specific credentials, you may either provide bucket
+    names like ``my-bucket``, or you can provide fully-qualified buckets like
+    ``s3://my-bucket`` and
+    ``https://voxel51.blob.core.windows.net/my-container``.
+
+.. note::
+
+    Only one **default credential** can exist per provider and scope. Adding
+    another default credential for the same provider at the same scope
+    **replaces** the existing one.
+
+    To use multiple credentials for the same provider and scope — for example, two
+    Azure storage accounts, or two AWS accounts — each credential must be
+    made bucket-specific by listing its buckets/containers. In particular,
+    for Azure the storage account name embedded in the credential is **not**
+    used to route requests; provide fully-qualified containers instead, e.g.
+    ``https://account1.blob.core.windows.net/container1``.
+
+Managed credentials are considered unique based on the scope (user, group,
+or global), cloud provider, and the optional bucket(s) they are associated
+with. The system will look for credentials in the following default order,
+stopping once the first credential is found:
+
+1.  If the current user has any bucket-specific credentials that match the
+    bucket of the media being accessed, those credentials will be used
+2.  If the current user belongs to any groups that have bucket-specific
+    credentials that match the bucket of the media being accessed, those
+    credentials will be used
+3.  If any global bucket-specific credentials match the bucket of the media
+    being accessed, those credentials will be used
+4.  If the current user has any default credentials for the provider of the
+    media being accessed, those credentials will be used
+5.  If the current user belongs to any groups that have default credentials
+    for the provider of the media being accessed, those credentials will be
+    used
+6.  If any global default credentials for the provider of the media being
+    accessed exist, those credentials will be used
+
+Setting managed credentials
+___________________________
+
+Admins can configure cloud credentials via the Settings > Cloud storage page.
 
 To upload a new credential, click the ``Add credential`` button:
 
@@ -578,29 +682,13 @@ available providers:
     :alt: blank-cloud-creds-modal
     :align: center
 
+.. note::
+    Any credentials configured via environment variables in your deployment
+    will not be displayed in this page.
+
 After the appropriate files or fields are populated, click ``Save credential``
 to store the (encrypted) credential.
 
-As depicted in the screenshot above, a credential can optionally be restricted
-to a specific list of bucket(s):
-
--   If one or more buckets are provided, the credentials are
-    **bucket-specific credentials** that will only be used to read/write media
-    within the specified bucket(s)
--   If no buckets are provided, the credentials are **default credentials**
-    that will be used whenever trying to read/write any media for the provider
-    that does not belong to a bucket with bucket-specific credentials
-
-.. note::
-
-    Bucket-specific credentials are useful in situations where you cannot or
-    do not wish to provide a single set of credentials to cover all buckets
-    that your team plans to use within a given cloud storage provider.
-
-    When providing bucket-specific credentials, you may either provide bucket
-    names like ``my-bucket``, or you can provide fully-qualified buckets like
-    ``s3://my-bucket`` and
-    ``https://voxel51.blob.core.windows.net/my-container``.
 
 Alternatively, credentials can be updated programmatically with the
 :meth:`add_cloud_credentials() <fiftyone.management.cloud_credentials.add_cloud_credentials>`
@@ -621,3 +709,93 @@ appropriate provider or specific bucket.
     Users cannot access stored credentials directly, either via the Enterprise UI or
     by using the Enterprise SDK locally. The credentials are only decrypted and
     used internally by the Enterprise servers.
+
+.. _enterprise-cloud-creds-origin-preference:
+
+Cloud credentials origin preference
+___________________________________
+
+If credentials are configured both on the local machine and remotely via the
+Enterprise server, the behavior is for the Enterprise SDK to use the first
+matching set of credentials found. 
+
+*  When running the Enterprise SDK locally, the default is to use local
+   credentials, if any exist, and otherwise to use managed credentials returned
+   by the Enterprise server.
+
+*  However, if the Enterprise SDK is being used in an Internal Service (App
+   server, delegated operator, etc.) the default is to prefer managed
+   credentials returned by the Enterprise server.
+
+This can be manually controlled by setting the
+`FIFTYONE_CLOUD_CREDS_ORIGIN_PREFERENCE` environment variable on the machine to
+either `local` or `remote`. Regardless of the preference, credentials from both
+sources will be considered if the default location has none that match. So if
+credentials from the preferred source have no matches for a given request,
+credentials from the other source will be attempted before giving up.
+
+.. _enterprise-cloud-creds-local-download:
+
+Cloud credentials local download
+________________________________
+
+By default, users must set up local credentials when using the Enterprise SDK
+with an API connection. This is to prevent downloading credentials from the
+Enterprise server to that user's local machine. However, you can change this
+default, so that local SDK usage will download credentials from the Enterprise
+server, and there is no need to configure credentials locally. To enable
+downloading of credentials to machines, set the environment variable
+`FEATURE_FLAG_ENABLE_CREDS_LOCAL_USE` to `True` in the `teams-api` container.
+
+.. _enterprise-ai-model-weights:
+
+AI model weights
+----------------
+
+.. customavailablein::
+    :enterprise_version: 2.19.0
+
+The FiftyOne Enterprise App ships with AI-assisted mask segmentation for annotation
+workflows. By default, the required model weights are served from Voxel51's
+CDN and no configuration is required.
+
+Deployments that prefer to serve the weights from their own infrastructure
+can set the optional `FIFTYONE_MODEL_WEIGHTS_BASE_SAM2` environment
+variable on the `fiftyone-app` container. The value is a base URL or
+cloud path that hosts the weights. The App appends the specific weight
+file to it at request time.
+
+The base location must host the two files that the App fetches:
+
+* `encoder.with_runtime_opt.ort`
+* `decoder.onnx`
+
+The SAM2 tiny variant is recommended for optimal user experience. The
+simplest way to populate your own location is to mirror the files Voxel51
+serves from its CDN, which are the canonical artifacts that the App is
+built against:
+
+.. code-block:: shell
+
+    curl -sSL -o encoder.with_runtime_opt.ort \
+        https://models-cdn.voxel51.com/sam2/encoder.with_runtime_opt.ort
+    curl -sSL -o decoder.onnx \
+        https://models-cdn.voxel51.com/sam2/decoder.onnx
+
+Then upload both files to the location referenced by
+`FIFTYONE_MODEL_WEIGHTS_BASE_SAM2`.
+
+.. code-block:: shell
+
+    # Private GCS bucket
+    FIFTYONE_MODEL_WEIGHTS_BASE_SAM2=gs://my-bucket/sam2
+
+    # Private S3 bucket
+    FIFTYONE_MODEL_WEIGHTS_BASE_SAM2=s3://my-bucket/sam2
+
+    # Private HTTPS endpoint
+    FIFTYONE_MODEL_WEIGHTS_BASE_SAM2=https://cdn.internal.example.com/sam2
+
+When a cloud path is used, URLs are signed automatically using the
+deployment's :ref:`cloud credentials <enterprise-cloud-credentials>`, so
+the `fiftyone-app` container must have read access to the bucket.

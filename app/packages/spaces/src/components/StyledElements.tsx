@@ -1,24 +1,26 @@
 import styled from "styled-components";
 
 export const SpaceContainer = styled.div`
+  position: relative;
   width: 100%;
   height: 100%;
   --focus-border: var(--fo-palette-neutral-plainColor);
 `;
 
 export const PanelContainer = styled.div`
+  position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
 `;
 
-export const PanelTabs = styled.div`
+export const PanelTabs = styled.div<{ $isModal?: boolean }>`
   display: flex;
   background: var(--fo-palette-background-header);
   padding-bottom: 0px;
 `;
 
-export const StyledPanel = styled.div`
+export const StyledPanel = styled.div<{ $isModalPanel?: boolean }>`
   width: 100%;
   height: calc(100% - 28px);
   overflow: auto;

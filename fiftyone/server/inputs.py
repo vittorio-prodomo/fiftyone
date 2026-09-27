@@ -5,6 +5,7 @@ FiftyOne Server shared GraphQL input types.
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 import typing as t
 import strawberry as gql
 
@@ -16,3 +17,4 @@ class SelectedLabel:
     sample_id: gql.ID
     frame_number: t.Optional[int] = None
     instance_id: t.Optional[gql.ID] = None
+    type: t.Optional[str] = None

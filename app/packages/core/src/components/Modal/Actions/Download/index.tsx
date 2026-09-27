@@ -1,7 +1,7 @@
 import { PillButton } from "@fiftyone/components";
 import {
   getSampleSrc,
-  getStandardizedUrls,
+  getNormalizedUrls,
   modalSample,
   selectedMediaField,
 } from "@fiftyone/state";
@@ -18,7 +18,7 @@ const Download = () => {
   const handleDownload = useCallback(() => {
     if (downloading) return;
 
-    const urls = getStandardizedUrls(rawUrls);
+    const urls = getNormalizedUrls(rawUrls);
     const rawUrl =
       urls?.[mediaField] ?? urls?.filepath ?? (sample?.filepath as string);
     if (!rawUrl) return;

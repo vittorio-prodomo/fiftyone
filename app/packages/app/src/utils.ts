@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import { matchPath } from "./routing";
 
 export const getDatasetName = (pathname?: string) => {
@@ -7,7 +11,7 @@ export const getDatasetName = (pathname?: string) => {
       path: "/datasets/:name",
     },
     window.location.search,
-    {}
+    {},
   );
 
   if (result) {
@@ -32,6 +36,17 @@ export function resolveURL(params: {
   extra?: { [key: string]: string | null };
 }): string {
   const searchParams = new URLSearchParams(params.currentSearch);
+
+  if (
+    params.nextDataset !== undefined &&
+    (params.nextDataset === null ||
+      !params.currentPathname.endsWith(
+        `/datasets/${encodeURIComponent(params.nextDataset)}`,
+      ))
+  ) {
+    searchParams.delete("subset");
+    searchParams.delete("subsetScope");
+  }
 
   if (!params.nextDataset && params.nextView) {
     throw new Error("a view cannot be provided without a dataset");

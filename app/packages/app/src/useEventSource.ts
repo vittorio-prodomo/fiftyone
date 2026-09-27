@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import type { Session } from "@fiftyone/state";
 import { stateSubscription, useClearModal } from "@fiftyone/state";
 import { env, getEventSource } from "@fiftyone/utilities";
@@ -7,6 +11,7 @@ import { useErrorHandler } from "react-error-boundary";
 import { useRecoilState, useRecoilValue } from "recoil";
 import type { Queries } from "./makeRoutes";
 import type { RoutingContext } from "./routing";
+import { useSetAppCount } from "./sharedSession/hooks";
 import useEvents from "./useEvents";
 import { AppReadyState } from "./useEvents/registerEvent";
 import { appReadyState } from "./useEvents/utils";
@@ -14,7 +19,7 @@ import { getDatasetName, getParam } from "./utils";
 
 const useEventSource = (
   router: RoutingContext<Queries>,
-  session: MutableRefObject<Session>
+  session: MutableRefObject<Session>,
 ) => {
   const [readyState, setReadyState] = useRecoilState(appReadyState);
   const readyStateRef = useRef<AppReadyState>(readyState);
@@ -25,10 +30,11 @@ const useEventSource = (
     controller,
     router,
     readyStateRef,
-    session
+    session,
   );
   const handleError = useErrorHandler();
   const clearModal = useClearModal();
+  const setAppCount = useSetAppCount();
 
   useEffect(() => {
     getEventSource(
@@ -49,6 +55,8 @@ const useEventSource = (
         onerror: (e) => handleError(e),
         onclose: () => {
           clearModal();
+          // the count is stale until the reopened stream reports a new one
+          setAppCount(null);
           setReadyState(AppReadyState.CLOSED);
         },
       },
@@ -64,7 +72,7 @@ const useEventSource = (
         },
         subscription,
         events: subscriptions,
-      }
+      },
     );
 
     return () => {
@@ -75,6 +83,7 @@ const useEventSource = (
     controller,
     handleError,
     handler,
+    setAppCount,
     setReadyState,
     subscription,
     subscriptions,

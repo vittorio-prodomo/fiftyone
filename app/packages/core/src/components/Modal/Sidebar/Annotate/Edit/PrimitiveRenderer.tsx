@@ -1,9 +1,10 @@
 import type { SchemaType } from "@fiftyone/core/src/plugins/SchemaIO/utils/types";
 import { Primitive } from "@fiftyone/utilities";
-import { DatePicker } from "@voxel51/voodo";
 import styled from "styled-components";
 import { SchemaIOComponent } from "../../../../../plugins/SchemaIO";
-import JSONEditor from "../SchemaManager/EditFieldLabelSchema/JSONEditor";
+import JSONEditor, {
+  JSONValue,
+} from "../SchemaManager/EditFieldLabelSchema/JSONEditor";
 
 const EditorContainer = styled.div`
   height: 400px;
@@ -13,7 +14,7 @@ const EditorContainer = styled.div`
 
 interface PrimitiveRendererProps {
   type: string;
-  fieldValue: Primitive | Date;
+  fieldValue: Primitive;
   handleChange: (data: unknown) => void;
   primitiveSchema: SchemaType | undefined;
 }
@@ -25,33 +26,17 @@ export default function PrimitiveRenderer({
   primitiveSchema,
 }: PrimitiveRendererProps) {
   const isJson = type === "dict";
-  const isDate = type === "date" || type === "datetime";
   if (isJson) {
     return (
       <EditorContainer>
         <JSONEditor
-          data={fieldValue as string}
+          data={(fieldValue as JSONValue) || {}}
           onChange={handleChange}
           errors={false}
           scanning={false}
+          showDocumentation={false}
         />
       </EditorContainer>
-    );
-  }
-
-  if (isDate) {
-    return (
-      <DatePicker
-        selected={fieldValue as Date}
-        showTimeSelect={type === "datetime"}
-        onChange={(date: Date | null) => {
-          if (date && !Number.isNaN(date.getTime())) {
-            handleChange(date.toISOString());
-          } else {
-            handleChange(undefined);
-          }
-        }}
-      />
     );
   }
 

@@ -1,10 +1,13 @@
 import { useAnnotationEventHandler } from "./useAnnotationEventHandler";
-import { useActivityToast } from "@fiftyone/state";
-import { useCallback } from "react";
+import { INDEFINITE_TOAST_TIMEOUT, useActivityToast } from "@fiftyone/state";
+import { useCallback, useEffect } from "react";
 import { IconName, Variant } from "@voxel51/voodo";
-import { useLabelsContext } from "@fiftyone/core/src/components/Modal/Sidebar/Annotate/useLabels";
-import { DetectionLabel } from "@fiftyone/looker";
-import { usePersistenceEventHandler } from "../persistence/usePersistenceEventHandler";
+import {
+  deriveSaveHealth,
+  usePersistenceEventHandler,
+  usePersistenceRetryController,
+  usePublishSaveStatus,
+} from "../persistence";
 
 /**
  * Hook which registers global annotation event handlers.
@@ -12,38 +15,50 @@ import { usePersistenceEventHandler } from "../persistence/usePersistenceEventHa
  */
 export const useRegisterAnnotationEventHandlers = () => {
   const { setConfig } = useActivityToast();
-  const { addLabelToSidebar } = useLabelsContext();
   const handlePersistenceRequest = usePersistenceEventHandler();
+  const retryController = usePersistenceRetryController();
+  const publishSaveStatus = usePublishSaveStatus();
+
+  // mirror the retry controller's health onto the shared save status the
+  // indicator reads; the toasts above and this light share one controller
+  useEffect(() => {
+    publishSaveStatus((prev) => ({
+      ...prev,
+      health: deriveSaveHealth(retryController),
+    }));
+  }, [
+    publishSaveStatus,
+    retryController.canAttempt,
+    retryController.isUnhealthy,
+  ]);
 
   useAnnotationEventHandler(
     "annotation:persistenceRequested",
     useCallback(async () => {
-      await handlePersistenceRequest();
-    }, [handlePersistenceRequest])
+      if (retryController.canAttempt) {
+        await handlePersistenceRequest();
+      }
+    }, [handlePersistenceRequest, retryController.canAttempt]),
   );
 
   useAnnotationEventHandler(
     "annotation:persistenceInFlight",
     useCallback(() => {
-      setConfig({
-        iconName: IconName.Spinner,
-        message: "Saving changes...",
-        variant: Variant.Secondary,
-        // allow for slow API calls; keep toast open until call resolves
-        timeout: 300_000,
-      });
-    }, [setConfig])
+      retryController.recordAttempt();
+      publishSaveStatus((prev) => ({ ...prev, inFlight: true }));
+    }, [publishSaveStatus, retryController]),
   );
 
   useAnnotationEventHandler(
     "annotation:persistenceSuccess",
     useCallback(() => {
-      setConfig({
-        iconName: IconName.Check,
-        message: "Changes saved successfully",
-        variant: Variant.Success,
-      });
-    }, [setConfig])
+      publishSaveStatus((prev) => ({
+        ...prev,
+        inFlight: false,
+        lastSavedAt: Date.now(),
+      }));
+      retryController.reset();
+    }, [publishSaveStatus, retryController]),
   );
 
   useAnnotationEventHandler(
@@ -52,28 +67,19 @@ export const useRegisterAnnotationEventHandlers = () => {
       ({ error }) => {
         console.error(error);
 
-        setConfig({
-          iconName: IconName.Error,
-          message: `Error saving changes: ${error}`,
-          variant: Variant.Danger,
-        });
-      },
-      [setConfig]
-    )
-  );
+        publishSaveStatus((prev) => ({ ...prev, inFlight: false }));
 
-  useAnnotationEventHandler(
-    "annotation:canvasDetectionOverlayEstablish",
-    useCallback(
-      (payload) => {
-        addLabelToSidebar({
-          data: payload.overlay.label as DetectionLabel,
-          overlay: payload.overlay,
-          path: payload.overlay.field,
-          type: "Detection",
-        });
+        if (retryController.isUnhealthy) {
+          setConfig({
+            iconName: IconName.Error,
+            message:
+              "We couldn’t save your work. Please refresh the page and try again.",
+            variant: Variant.Danger,
+            timeout: INDEFINITE_TOAST_TIMEOUT,
+          });
+        }
       },
-      [addLabelToSidebar]
-    )
+      [publishSaveStatus, retryController.isUnhealthy, setConfig],
+    ),
   );
 };

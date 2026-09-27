@@ -2,13 +2,17 @@
  * Copyright 2017-2026, Voxel51, Inc.
  */
 
-import { getEventBus, type EventDispatcher } from "@fiftyone/events";
-import { CONTAINS } from "../core/Scene2D";
+import { type EventDispatcher, getEventBus } from "@fiftyone/events";
+import { CONTAINS } from "../core/containment";
 import type { LighterEventGroup } from "../events";
-import { InteractionHandler } from "../interaction/InteractionManager";
+import type {
+  InteractionHandler,
+  OverlayEvent,
+} from "../interaction/InteractionManager";
 import type { Renderer2D } from "../renderer/Renderer2D";
 import type { ResourceLoader } from "../resource/ResourceLoader";
 import type {
+  CoordinateSystem,
   DrawStyle,
   Point,
   RawLookerLabel,
@@ -19,11 +23,20 @@ import type {
 /**
  * Base abstract class for all overlays.
  */
-export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
-  implements InteractionHandler
-{
+export abstract class BaseOverlay<
+  Label extends RawLookerLabel = RawLookerLabel,
+> implements InteractionHandler {
   readonly id: string;
   readonly cursor?: string;
+
+  /**
+   * Whether this overlay represents real annotation data that should be
+   * saved. Set to `false` for UI scaffolding (e.g. the point-selection
+   * keypoint overlay) that lives in the scene but must not be picked up by
+   * persistence. Consumers walking `scene.getAllOverlays()` for save deltas
+   * should skip overlays where this is `false`.
+   */
+  public isPersistent = true;
 
   protected isHoveredState = false;
 
@@ -33,6 +46,7 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
    */
   protected isDirty = false;
 
+  protected coordinateSystem?: CoordinateSystem;
   protected renderer?: Renderer2D;
   protected resourceLoader?: ResourceLoader;
   protected currentStyle?: DrawStyle;
@@ -79,8 +93,16 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
     if (!bounds) return false;
 
     return ["x", "y", "width", "height"].every(
-      (prop) => !Number.isNaN(bounds[prop])
+      (prop) => !Number.isNaN(bounds[prop]),
     );
+  }
+
+  /**
+   * Sets the coordinate system for this overlay.
+   * @param coordinateSystem - The coordinate system to use.
+   */
+  setCoordinateSystem(coordinateSystem: CoordinateSystem): void {
+    this.coordinateSystem = coordinateSystem;
   }
 
   /**
@@ -118,12 +140,32 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
   render(
     renderer: Renderer2D,
     style: DrawStyle | null,
-    meta: RenderMeta
-  ): void | Promise<void> {
+    meta: RenderMeta,
+  ): void {
     // Store the current style for use in other methods
     this.currentStyle = style || undefined;
 
-    this.renderImpl(renderer, meta);
+    // Open a rebuild pass around the paint so `renderImpl` can redraw
+    // declaratively — list your draws, top to bottom — while the renderer
+    // reuses the display objects the last pass left behind and discards
+    // whatever this one did not reach. Wrapping here rather than inside each
+    // `renderImpl` is what makes the early returns (`if (!style) return`)
+    // safe: the pass still closes.
+    //
+    // A pass opens and closes within ONE `render` call, which is why
+    // `renderImpl` is synchronous. The cursor is per CONTAINER, not per call,
+    // so an async `renderImpl` that awaited between draws could have a
+    // re-render reset its cursor to 0 mid-list and then delete it out from
+    // under the newer pass. `finally` covers the other half: a throwing
+    // `renderImpl` is caught upstream by `executeOverlayRender`, and leaving
+    // the pass open would strand the cursor and every slot past it.
+    renderer.beginRebuild(this.containerId);
+
+    try {
+      this.renderImpl(renderer, meta);
+    } finally {
+      renderer.endRebuild(this.containerId);
+    }
   }
 
   /**
@@ -131,10 +173,7 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
    * @param renderer - The renderer to use for drawing.
    * @param meta - Rendering metadata containing canonical media bounds and overlay index.
    */
-  protected abstract renderImpl(
-    renderer: Renderer2D,
-    meta: RenderMeta
-  ): void | Promise<void>;
+  protected abstract renderImpl(renderer: Renderer2D, meta: RenderMeta): void;
 
   /**
    * Gets the current draw style used for this overlay.
@@ -219,6 +258,7 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
    * Override this method in subclasses to perform specific cleanup.
    */
   destroy(): void {
+    this.renderer?.dispose(this.containerId);
     this._eventBus = undefined;
     this._eventChannel = undefined;
   }
@@ -241,7 +281,7 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
    * @param point - The point to test.
    * @returns The containment level (NONE = 0, CONTENT = 1, BORDER = 2).
    */
-  getContainmentLevel(point: Point): CONTAINS {
+  getContainmentLevel(_point: Point): CONTAINS {
     return CONTAINS.NONE;
   }
 
@@ -286,7 +326,7 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
    * @param event - The original pointer event.
    * @returns True if the event was handled.
    */
-  onHoverEnter(point: Point | null, event: PointerEvent | null): boolean {
+  onHoverEnter(_point: Point | null, _event: PointerEvent | null): boolean {
     this.isHoveredState = true;
     this.markDirty();
     return true;
@@ -299,7 +339,7 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
    * @param event - The original pointer event.
    * @returns True if the event was handled.
    */
-  onHoverLeave?(point?: Point | null, event?: PointerEvent | null): boolean {
+  onHoverLeave?(_point?: Point | null, _event?: PointerEvent | null): boolean {
     this.isHoveredState = false;
     this.markDirty();
     return true;
@@ -312,50 +352,33 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
    * @param event - The original pointer event.
    * @returns True if the event was handled.
    */
-  onHoverMove(point?: Point | null, event?: PointerEvent | null): boolean {
+  onHoverMove(_point?: Point | null, _event?: PointerEvent | null): boolean {
     return true;
   }
 
   /**
-   * Handle pointer down event.
-   * Override in subclasses to implement custom behavior.
-   * @param point - The point where the event occurred.
-   * @param worldPoint - Screen point translated to viewport point.
-   * @param event - The original pointer event.
-   * @param scale - The current scaling factor of the viewport.
+   * Handle pointer-down event.
+   * Override in subclasses to implement drag, resize, or painting behavior.
+   * @param params - The overlay event containing pointer and tool state.
    * @returns True if the event was handled.
    */
-  onPointerDown?(
-    point: Point,
-    worldPoint: Point,
-    event: PointerEvent,
-    scale: number
-  ): boolean;
+  onPointerDown?(params: OverlayEvent): boolean;
 
   /**
-   * Handle drag event.
-   * Override in subclasses to implement custom behavior.
-   * @param point - The point where the event occurred.
-   * @param worldPoint - Screen point translated to viewport point.
-   * @param event - The original pointer event.
-   * @param scale - The current scaling factor of the viewport.
+   * Handle pointer-move event while a gesture is active.
+   * Override in subclasses to implement drag, resize, or painting behavior.
+   * @param params - The overlay event containing pointer and tool state.
    * @returns True if the event was handled.
    */
-  onMove?(
-    point: Point,
-    worldPoint: Point,
-    event: PointerEvent,
-    scale: number
-  ): boolean;
+  onMove?(params: OverlayEvent): boolean;
 
   /**
-   * Handle pointer up event.
-   * Override in subclasses to implement custom behavior.
-   * @param point - The point where the event occurred.
-   * @param event - The original pointer event.
+   * Handle pointer-up event.
+   * Override in subclasses to finalize drag, resize, or painting behavior.
+   * @param params - The overlay event containing pointer and tool state.
    * @returns True if the event was handled.
    */
-  onPointerUp?(point: Point, event: PointerEvent): boolean;
+  onPointerUp?(params: OverlayEvent): boolean;
 
   /**
    * Handle click event.
@@ -384,10 +407,23 @@ export abstract class BaseOverlay<Label extends RawLookerLabel = RawLookerLabel>
   }
 
   /**
-   * Updates the label for this overlay.
+   * Apply label state without emitting — the silent half of
+   * {@link updateLabel}. Used by Sample→overlay reconciliation so an applied
+   * change does not re-enter the overlay→Sample write path. Subclasses override
+   * to apply their derived state, but must NOT dispatch
+   * `lighter:overlay-commit-requested` here (that belongs in {@link updateLabel}).
+   * @param label - The new label.
+   */
+  applyLabel(label: Label) {
+    this.label = label;
+  }
+
+  /**
+   * Apply a label as a user edit: {@link applyLabel} plus the
+   * `lighter:overlay-commit-requested` dispatch that drives downstream sync.
    * @param label - The new label.
    */
   updateLabel(label: Label) {
-    this.label = label;
+    this.applyLabel(label);
   }
 }

@@ -1,0 +1,363 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ *
+ * Dynamic-attribute sub-track rows on the video timeline: collapsed by default
+ * behind the parent's chevron, one row per declared-dynamic attribute with its
+ * value coalesced into segments, and a mid-track forward-fill splits a row into
+ * two segments. Re-seeded per test with one tracked `vehicle` carrying
+ * `turn_signal` = "off" on every frame.
+ */
+import { expect, test as base } from "src/oss/fixtures";
+import { ModalPom } from "src/oss/poms/modal";
+import { getUniqueDatasetNameWithPrefix } from "src/oss/utils";
+import type { AbstractFiftyoneLoader } from "src/shared/abstract-loader";
+import type { DatasetFactory } from "src/shared/dataset-factory";
+import type { Page } from "src/oss/fixtures";
+
+const datasetName = getUniqueDatasetNameWithPrefix(
+  "annotate-video-dynamic-subtracks",
+);
+const id = "000000000000000000000000";
+
+const test = base.extend<{ modal: ModalPom }>({
+  modal: async ({ page, eventUtils }, use) => {
+    await use(new ModalPom(page, eventUtils));
+  },
+});
+
+test.beforeAll(async ({ foWebServer }) => {
+  await foWebServer.startWebServer();
+});
+
+test.afterAll(async ({ foWebServer }) => {
+  await foWebServer.stopWebServer();
+});
+
+const openAnnotate = async (
+  fiftyoneLoader: AbstractFiftyoneLoader,
+  modal: ModalPom,
+  page: Page,
+) => {
+  await fiftyoneLoader.waitUntilGridVisible(page, datasetName, {
+    searchParams: new URLSearchParams({ id }),
+  });
+  await modal.assert.isOpen();
+  await modal.sidebar.switchMode("annotate");
+  await modal.videoAnnotate.waitForSurface();
+};
+
+/** Drop focus so the "." / "," frame-step keybindings aren't typed into an input. */
+const blur = (page: Page) =>
+  page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+
+/** Await the autosave round-trip for the edited sample. */
+const savedResponse = (page: Page) =>
+  page.waitForResponse(
+    (r) =>
+      /\/sample\//.test(r.url()) &&
+      ["POST", "PATCH", "PUT"].includes(r.request().method()),
+  );
+
+const ATTR = "turn_signal";
+
+/** Step the playhead by `delta` frames (negative = backward), un-focused. */
+const stepFrames = async (modal: ModalPom, page: Page, delta: number) => {
+  await blur(page);
+  const va = modal.videoAnnotate;
+
+  for (let i = 0; i < Math.abs(delta); i++) {
+    if (delta > 0) {
+      await va.stepForward();
+    } else {
+      await va.stepBack();
+    }
+  }
+};
+
+/** Commit a `turn_signal` choice at the current frame and await the save. */
+const setSignal = async (modal: ModalPom, page: Page, choice: string) => {
+  const saved = savedResponse(page);
+  await modal.sidebar.edit.selectFieldChoice(ATTR, choice);
+  await saved;
+};
+
+/** Assert the selected track's `turn_signal` value at the current frame. */
+const assertSignal = async (modal: ModalPom, expected: string) =>
+  expect.poll(() => modal.sidebar.edit.getFieldValue(ATTR)).toBe(expected);
+
+/**
+ * Seed one tracked instance carrying `turn_signal`="off" on every frame. 20
+ * frames @ 10fps — long enough to fill several frames forward.
+ */
+const seedSingle = (datasetFactory: typeof DatasetFactory) =>
+  datasetFactory.createDataset({
+    mediaType: "video",
+    datasetName,
+    sampleFrames: true,
+    schema: {
+      "frames.detections": "Detections",
+      "frames.detections.detections.instance": "Instance",
+      "frames.detections.detections.keyframe": "BooleanField",
+      "frames.detections.detections.propagation": "DictField",
+      [`frames.detections.detections.${ATTR}`]: "StringField",
+    },
+    labelSchemas: {
+      "frames.detections": {
+        type: "detections",
+        component: "dropdown",
+        classes: ["vehicle", "person", "road sign"],
+        attributes: [
+          { name: "id", type: "id", component: "text", read_only: true },
+          { name: "tags", type: "list<str>", component: "text" },
+          { name: "confidence", type: "float", component: "text" },
+          { name: "index", type: "int", component: "text" },
+          { name: "mask_path", type: "str", component: "text" },
+          {
+            name: ATTR,
+            type: "str",
+            component: "dropdown",
+            values: ["off", "left", "right"],
+            dynamic: true,
+          },
+        ],
+      },
+    },
+    withFrameData: (_, { label }) => ({
+      detections: label.detections([
+        label.detection({
+          label: "vehicle",
+          bounding_box: [0.3, 0.3, 0.2, 0.2],
+          index: 1,
+          instance: label.instance("vehicle-1"),
+          [ATTR]: "off",
+        }),
+      ]),
+    }),
+  });
+
+test.describe.serial("video annotation dynamic attribute sub-tracks", () => {
+  test.beforeEach(async ({ datasetFactory }) => {
+    await seedSingle(datasetFactory);
+  });
+
+  test("a chevron reveals one sub-track per dynamic attribute; collapsing hides it", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    const parentId = await va.firstObjectTrackId();
+
+    // sub-track expansion lives in the drawer body; the drawer starts closed
+    await va.openTracksDrawer();
+    const subId = `${parentId}::${ATTR}`;
+
+    // Collapsed by default — no sub-track rows.
+    expect(await va.subTrackIds(parentId)).toHaveLength(0);
+
+    // Expand: exactly the one declared-dynamic attribute's row appears.
+    await va.toggleTrackExpansion(parentId);
+    await expect.poll(() => va.subTrackIds(parentId)).toEqual([subId]);
+
+    // Uniform "off" across the clip → a single value segment.
+    await expect(va.segmentBars(subId)).toHaveCount(1);
+
+    // Collapse: the sub-track row is hidden again.
+    await va.toggleTrackExpansion(parentId);
+    await expect.poll(() => va.subTrackIds(parentId)).toHaveLength(0);
+  });
+
+  test("a mid-track edit splits the sub-track into two value segments", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.selectLabel("vehicle");
+
+    // Edit at frame 4 → "left": forward-fills 4..end, so "off" 1..3 / "left" 4..end.
+    await stepFrames(modal, page, 3);
+    await setSignal(modal, page, "left");
+
+    const parentId = await va.firstObjectTrackId();
+
+    // sub-track expansion lives in the drawer body; the drawer starts closed
+    await va.openTracksDrawer();
+    const subId = `${parentId}::${ATTR}`;
+
+    await va.toggleTrackExpansion(parentId);
+
+    // Two value segments now, labelled by their values.
+    await expect(va.segmentBars(subId)).toHaveCount(2);
+    await expect(va.segmentBars(subId).nth(0)).toHaveAttribute("title", /off/);
+    await expect(va.segmentBars(subId).nth(1)).toHaveAttribute("title", /left/);
+  });
+
+  test("undo collapses the two segments back to one", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.selectLabel("vehicle");
+
+    // Split into two segments (off 1..3 / left 4..end).
+    await stepFrames(modal, page, 3);
+    await setSignal(modal, page, "left");
+
+    const parentId = await va.firstObjectTrackId();
+
+    // sub-track expansion lives in the drawer body; the drawer starts closed
+    await va.openTracksDrawer();
+    const subId = `${parentId}::${ATTR}`;
+
+    await va.toggleTrackExpansion(parentId);
+    await expect(va.segmentBars(subId)).toHaveCount(2);
+
+    // The whole forward-fill is one undo unit → the row reverts to one segment.
+    await modal.sidebar.edit.undo();
+    await expect(va.segmentBars(subId)).toHaveCount(1);
+    await expect(va.segmentBars(subId).nth(0)).toHaveAttribute("title", /off/);
+  });
+
+  test("clicking a value segment seeks to its start", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.selectLabel("vehicle");
+
+    // off 1..3 / left 4..end (the "left" segment starts at frame 4).
+    await stepFrames(modal, page, 3);
+    await setSignal(modal, page, "left");
+
+    const parentId = await va.firstObjectTrackId();
+
+    // sub-track expansion lives in the drawer body; the drawer starts closed
+    await va.openTracksDrawer();
+    const subId = `${parentId}::${ATTR}`;
+
+    await va.toggleTrackExpansion(parentId);
+
+    // Move into the "off" region, then click the "left" segment.
+    await stepFrames(modal, page, -3);
+    await assertSignal(modal, "off");
+    await va.segmentBars(subId).nth(1).click();
+
+    // The playhead landed on the "left" segment's start (frame 4): it reads
+    // "left", and one frame earlier (frame 3) is still "off".
+    await assertSignal(modal, "left");
+    await stepFrames(modal, page, -1);
+    await assertSignal(modal, "off");
+  });
+
+  test("clicking a sub-track row selects the parent instance", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    const parentId = await va.firstObjectTrackId();
+
+    // sub-track expansion lives in the drawer body; the drawer starts closed
+    await va.openTracksDrawer();
+    const subId = `${parentId}::${ATTR}`;
+
+    // Expand without selecting anything first.
+    await va.toggleTrackExpansion(parentId);
+
+    // Clicking the sub-track row selects the PARENT object track, opening its
+    // editor — its `turn_signal` field becomes readable (frame 1 → "off").
+    await va.clickTrack(subId);
+    await expect(modal.sidebar.edit.getFieldContainer(ATTR)).toBeVisible();
+    await assertSignal(modal, "off");
+  });
+});
+
+test.describe.serial("video annotation multiple dynamic attributes", () => {
+  test.beforeEach(async ({ datasetFactory }) => {
+    await datasetFactory.createDataset({
+      mediaType: "video",
+      datasetName,
+      sampleFrames: true,
+      schema: {
+        "frames.detections": "Detections",
+        "frames.detections.detections.instance": "Instance",
+        "frames.detections.detections.keyframe": "BooleanField",
+        "frames.detections.detections.propagation": "DictField",
+        [`frames.detections.detections.${ATTR}`]: "StringField",
+        "frames.detections.detections.brake": "StringField",
+      },
+      labelSchemas: {
+        "frames.detections": {
+          type: "detections",
+          component: "dropdown",
+          classes: ["vehicle", "person", "road sign"],
+          attributes: [
+            { name: "id", type: "id", component: "text", read_only: true },
+            { name: "tags", type: "list<str>", component: "text" },
+            { name: "confidence", type: "float", component: "text" },
+            { name: "index", type: "int", component: "text" },
+            { name: "mask_path", type: "str", component: "text" },
+            {
+              name: ATTR,
+              type: "str",
+              component: "dropdown",
+              values: ["off", "left", "right"],
+              dynamic: true,
+            },
+            {
+              name: "brake",
+              type: "str",
+              component: "dropdown",
+              values: ["off", "on"],
+              dynamic: true,
+            },
+          ],
+        },
+      },
+      withFrameData: (_, { label }) => ({
+        detections: label.detections([
+          label.detection({
+            label: "vehicle",
+            bounding_box: [0.3, 0.3, 0.2, 0.2],
+            index: 1,
+            instance: label.instance("vehicle-1"),
+            [ATTR]: "off",
+            brake: "off",
+          }),
+        ]),
+      }),
+    });
+  });
+
+  test("a track expands to one sub-track row per declared dynamic attribute", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    const parentId = await va.firstObjectTrackId();
+
+    // sub-track expansion lives in the drawer body; the drawer starts closed
+    await va.openTracksDrawer();
+
+    await va.toggleTrackExpansion(parentId);
+    await expect
+      .poll(async () => (await va.subTrackIds(parentId)).sort())
+      .toEqual([`${parentId}::brake`, `${parentId}::${ATTR}`].sort());
+  });
+});

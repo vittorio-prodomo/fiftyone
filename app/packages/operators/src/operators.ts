@@ -2,11 +2,12 @@ import { AnalyticsInfo, usingAnalytics } from "@fiftyone/analytics";
 import SpaceNode from "@fiftyone/spaces/src/SpaceNode";
 import { SpaceNodeJSON } from "@fiftyone/spaces/src/types";
 import { spaceNodeFromJSON } from "@fiftyone/spaces/src/utils";
+import type { SelectionStyle, SelectionType, State } from "@fiftyone/state";
 import { getFetchFunction, isNullish, ServerError } from "@fiftyone/utilities";
 import { CallbackInterface } from "recoil";
-import { QueueItemStatus } from "./constants";
+import { QueueItemStatus, RiskLevel } from "./constants";
 import * as types from "./types";
-import { ExecutionCallback, OperatorExecutorOptions } from "./types-internal";
+import { ExecutionCallback, OperatorExecutorOptions } from "./ts";
 import { stringifyError } from "./utils";
 import { ValidationContext, ValidationError } from "./validation";
 
@@ -21,13 +22,13 @@ class InvocationRequest {
   constructor(
     public operatorURI: string,
     public params: unknown = {},
-    public options?: OperatorExecutorOptions
+    public options?: OperatorExecutorOptions,
   ) {}
   static fromJSON(json: RawInvocationRequest): InvocationRequest {
     return new InvocationRequest(
       json.operator_uri || json.operator_name,
       json.params,
-      json.options
+      json.options,
     );
   }
   toJSON() {
@@ -40,7 +41,10 @@ class InvocationRequest {
 }
 
 export class Executor {
-  constructor(public requests: InvocationRequest[], public logs: string[]) {
+  constructor(
+    public requests: InvocationRequest[],
+    public logs: string[],
+  ) {
     this.requests = requests || [];
     this.logs = logs || [];
   }
@@ -56,8 +60,10 @@ export class Executor {
   }
   static fromJSON(json: { requests: RawInvocationRequest[]; logs: string[] }) {
     return new Executor(
-      json.requests.map((r: any) => InvocationRequest.fromJSON(r)),
-      json.logs
+      json.requests.map((r: RawInvocationRequest) =>
+        InvocationRequest.fromJSON(r),
+      ),
+      json.logs,
     );
   }
   trigger(operatorURI: string, params: object = {}) {
@@ -71,24 +77,25 @@ export class Executor {
 
 class Panel {
   constructor(public id: string) {}
-  static fromJSON(json: any) {
+  static fromJSON(json: { id: string }) {
     return new Panel(json.id);
   }
 }
 
 export type RawContext = {
   datasetName: string;
-  extended: boolean;
+  extended: object;
   view: string;
   filters: object;
-  selectedSamples: Set<string>;
-  selectedLabels: any[];
+  selectedSamples: Map<string, SelectionType>;
+  sampleSelectionStyle: SelectionStyle;
+  selectedLabels: State.SelectedLabel[];
   currentSample: string;
   viewName: string;
-  delegationTarget: string;
-  requestDelegation: boolean;
-  state: CallbackInterface;
-  analyticsInfo: AnalyticsInfo;
+  delegationTarget?: string;
+  requestDelegation?: boolean;
+  state?: CallbackInterface;
+  analyticsInfo?: AnalyticsInfo;
   extendedSelection: {
     selection: string[] | null;
     scope: string;
@@ -97,7 +104,7 @@ export type RawContext = {
   queryPerformance?: boolean;
   spaces: SpaceNodeJSON;
   workspaceName: string;
-  promptId: string | null;
+  promptId?: string | null;
   activeFields: string[];
 };
 
@@ -107,7 +114,7 @@ export class ExecutionContext {
     public params: object = {},
     public _currentContext: RawContext,
     public hooks: object = {},
-    public executor: Executor = null
+    public executor: Executor = null,
   ) {
     this.state = _currentContext.state;
   }
@@ -120,28 +127,28 @@ export class ExecutionContext {
   public get view(): string {
     return this._currentContext.view;
   }
-  public get extended(): boolean {
+  public get extended(): object {
     return this._currentContext.extended;
   }
-  public get filters(): any {
+  public get filters(): object {
     return this._currentContext.filters;
   }
-  public get selectedSamples(): any {
+  public get selectedSamples(): Map<string, SelectionType> {
     return this._currentContext.selectedSamples;
   }
-  public get selectedLabels(): any {
+  public get selectedLabels(): State.SelectedLabel[] {
     return this._currentContext.selectedLabels;
   }
-  public get currentSample(): any {
+  public get currentSample(): string {
     return this._currentContext.currentSample;
   }
-  public get viewName(): any {
+  public get viewName(): string {
     return this._currentContext.viewName;
   }
-  public get extendedSelection(): any {
+  public get extendedSelection(): RawContext["extendedSelection"] {
     return this._currentContext.extendedSelection;
   }
-  public get groupSlice(): any {
+  public get groupSlice(): string {
     return this._currentContext.groupSlice;
   }
   public get queryPerformance(): boolean {
@@ -165,7 +172,7 @@ export class ExecutionContext {
   trigger(operatorURI: string, params: object = {}) {
     if (!this.executor) {
       throw new Error(
-        "Cannot trigger operator from outside of an execution context"
+        "Cannot trigger operator from outside of an execution context",
       );
     }
     this.executor.requests.push(new InvocationRequest(operatorURI, params));
@@ -181,12 +188,12 @@ export class ExecutionContext {
       { ...this.params },
       { ...this._currentContext },
       { ...this.hooks },
-      this.executor
+      this.executor,
     );
   }
 }
 
-function isObjWithContent(obj: any) {
+function isObjWithContent(obj: unknown) {
   if (obj === null) return false;
   return typeof obj === "object" && Object.keys(obj).length > 0;
 }
@@ -198,7 +205,7 @@ export class OperatorResult {
     public executor: Executor = null,
     public error: string,
     public delegated: boolean = false,
-    public errorMessage: string = null
+    public errorMessage: string = null,
   ) {}
 
   static create(
@@ -209,7 +216,7 @@ export class OperatorResult {
       error?: string;
       delegated?: boolean;
       errorMessage?: string;
-    } = {}
+    } = {},
   ): OperatorResult {
     return new OperatorResult(
       options.operator || null,
@@ -217,7 +224,7 @@ export class OperatorResult {
       options.executor || null,
       options.error || null,
       options.delegated || false,
-      options.errorMessage || null
+      options.errorMessage || null,
     );
   }
 
@@ -251,6 +258,7 @@ export type OperatorConfigOptions = {
   resolveExecutionOptionsOnChange?: boolean;
   skipInput?: boolean;
   skipOutput?: boolean;
+  riskLevel?: RiskLevel;
 };
 export class OperatorConfig {
   public name: string;
@@ -269,6 +277,7 @@ export class OperatorConfig {
   public resolveExecutionOptionsOnChange = false;
   public skipInput: boolean;
   public skipOutput: boolean;
+  public riskLevel: RiskLevel = RiskLevel.LOW;
 
   constructor(options: OperatorConfigOptions) {
     this.name = options.name;
@@ -289,6 +298,7 @@ export class OperatorConfig {
       options.resolveExecutionOptionsOnChange || false;
     this.skipInput = options.skipInput || false;
     this.skipOutput = options.skipOutput || false;
+    this.riskLevel = options.riskLevel || RiskLevel.LOW;
   }
   static fromJSON(json) {
     return new OperatorConfig({
@@ -308,6 +318,7 @@ export class OperatorConfig {
       resolveExecutionOptionsOnChange: json.resolve_execution_options_on_change,
       skipInput: json.skip_input,
       skipOutput: json.skip_output,
+      riskLevel: json.risk_level,
     });
   }
 }
@@ -316,7 +327,7 @@ export class Operator {
   constructor(
     public pluginName: string,
     public _builtIn: boolean = false,
-    public _config: OperatorConfig = null
+    public _config: OperatorConfig = null,
   ) {
     this._config = _config;
   }
@@ -335,6 +346,9 @@ export class Operator {
   }
   get unlisted() {
     return this.config.unlisted;
+  }
+  get riskLevel() {
+    return this.config.riskLevel || RiskLevel.LOW;
   }
   async needsUserInput(ctx: ExecutionContext) {
     const inputs = await this.resolveInput(ctx);
@@ -359,7 +373,7 @@ export class Operator {
     }
     return false;
   }
-  useHooks(): object {
+  useHooks(): unknown {
     // This can be overridden to use hooks in the execute function
     return {};
   }
@@ -379,10 +393,10 @@ export class Operator {
     }
     return null;
   }
-  async resolvePlacement(): Promise<void | types.Placement> {
+  async resolvePlacement(): Promise<void | null | types.Placement> {
     return null;
   }
-  async execute(ctx: ExecutionContext) {
+  async execute(ctx: ExecutionContext): Promise<unknown> {
     ctx;
     throw new Error(`Operator ${this.uri} does not implement execute`);
   }
@@ -422,7 +436,7 @@ export let initializationErrors = [];
 
 export function registerOperator(
   OperatorType: typeof Operator,
-  pluginName: string
+  pluginName: string,
 ) {
   const operator = new OperatorType(pluginName);
   localRegistry.register(operator);
@@ -439,10 +453,10 @@ export async function loadOperatorsFromServer(datasetName: string) {
     const { operators, errors } = await getFetchFunction()(
       "POST",
       "/operators",
-      { dataset_name: datasetName }
+      { dataset_name: datasetName },
     );
-    const operatorInstances = operators.map((d: any) =>
-      Operator.fromRemoteJSON(d)
+    const operatorInstances = operators.map((d: object) =>
+      Operator.fromRemoteJSON(d),
     );
     for (const operator of operatorInstances) {
       remoteRegistry.register(operator);
@@ -458,6 +472,10 @@ export async function loadOperatorsFromServer(datasetName: string) {
         console.error(error);
       }
     }
+
+    return operators
+      .filter((d: { panel?: { panel_name?: string } }) => d.panel)
+      .map((d: { panel?: { panel_name?: string } }) => d.panel);
   } catch (e) {
     initializationErrors.push({
       reason: "Error loading operators from server",
@@ -476,6 +494,8 @@ export async function loadOperatorsFromServer(datasetName: string) {
       throw e;
     }
   }
+
+  return [];
 }
 
 export function getLocalOrRemoteOperator(operatorURI) {
@@ -504,7 +524,7 @@ export function listLocalAndRemoteOperators() {
 }
 
 export async function executeOperatorsForEvent(
-  event: "onStartup" | "onDatasetOpen"
+  event: "onStartup" | "onDatasetOpen",
 ) {
   const { allOperators } = listLocalAndRemoteOperators();
   for (const operator of allOperators) {
@@ -535,7 +555,7 @@ class GeneratedMessage {
   }
   public type: MessageType;
   public cls: typeof InvocationRequest | typeof ExecutionResult;
-  public body: any;
+  public body: { operator_uri?: string; params?: object };
   static fromJSON(json) {
     let cls = null;
     switch (json.cls) {
@@ -574,9 +594,24 @@ function formatSelectedLabels(selectedLabels) {
   return labels;
 }
 
+export function formatSelectionPayload(currentContext: Partial<RawContext>) {
+  return {
+    selected: currentContext.selectedSamples
+      ? Array.from(currentContext.selectedSamples.keys())
+      : [],
+    selected_samples: currentContext.selectedSamples
+      ? Array.from(currentContext.selectedSamples.entries()).map(
+          ([id, type]) => ({ id, type }),
+        )
+      : [],
+    sample_selection_style: currentContext.sampleSelectionStyle || {},
+    selected_labels: formatSelectedLabels(currentContext.selectedLabels),
+  };
+}
+
 async function executeOperatorAsGenerator(
   operator: Operator,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
 ) {
   const currentContext = ctx._currentContext;
   const parser = await getFetchFunction()(
@@ -592,10 +627,7 @@ async function executeOperatorAsGenerator(
       operator_uri: operator.uri,
       params: ctx.params,
       request_delegation: ctx.requestDelegation,
-      selected: currentContext.selectedSamples
-        ? Array.from(currentContext.selectedSamples)
-        : [],
-      selected_labels: formatSelectedLabels(currentContext.selectedLabels),
+      ...formatSelectionPayload(currentContext),
       view: currentContext.view,
       view_name: currentContext.viewName,
       group_slice: currentContext.groupSlice,
@@ -605,7 +637,7 @@ async function executeOperatorAsGenerator(
       prompt_id: ctx.promptId,
       active_fields: ctx.activeFields,
     },
-    "json-stream"
+    "json-stream",
   );
 
   // Add the parser to the abortable operation queue
@@ -663,18 +695,18 @@ function resolveOperatorURIWithMethod(operatorURI, params) {
 export async function executeOperator(
   uri: string,
   params: unknown = {},
-  options?: OperatorExecutorOptions
+  options?: OperatorExecutorOptions,
 ) {
   const { operatorURI, params: computedParams } = resolveOperatorURIWithMethod(
     uri,
-    params
+    params,
   );
   const resolvedOperatorURI = resolveOperatorURI(operatorURI);
   const queue = getInvocationRequestQueue();
   const request = new InvocationRequest(
     resolvedOperatorURI,
     computedParams,
-    options
+    options,
   );
   queue.add(request);
 }
@@ -682,7 +714,7 @@ export async function executeOperator(
 export async function validateOperatorInputs(
   operator: Operator,
   ctx: ExecutionContext,
-  resolvedInputs: types.Property
+  resolvedInputs: types.Property,
 ): Promise<[ValidationContext, ValidationError[]]> {
   const validationCtx = new ValidationContext(ctx, resolvedInputs, operator);
   const validationErrors = validationCtx.toProps().errors;
@@ -692,7 +724,7 @@ export async function validateOperatorInputs(
 function trackOperatorExecution(
   operatorURI,
   params,
-  { info, delegated, isRemote, error }
+  { info, delegated, isRemote, error },
 ) {
   const analytics = usingAnalytics(info);
   const paramKeys = Object.keys(params || {});
@@ -715,7 +747,7 @@ function trackOperatorExecution(
 
 export async function executeOperatorWithContext(
   uri: string,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
 ) {
   const { operatorURI, params } = resolveOperatorURIWithMethod(uri, ctx.params);
   ctx.params = params;
@@ -760,10 +792,7 @@ export async function executeOperatorWithContext(
           operator_uri: operatorURI,
           params: ctx.params,
           request_delegation: ctx.requestDelegation,
-          selected: currentContext.selectedSamples
-            ? Array.from(currentContext.selectedSamples)
-            : [],
-          selected_labels: formatSelectedLabels(currentContext.selectedLabels),
+          ...formatSelectionPayload(currentContext),
           view: currentContext.view,
           view_name: currentContext.viewName,
           group_slice: currentContext.groupSlice,
@@ -772,7 +801,7 @@ export async function executeOperatorWithContext(
           workspace_name: currentContext.workspaceName,
           prompt_id: ctx.promptId,
           active_fields: ctx.activeFields,
-        }
+        },
       );
       result = serverResult.result;
       error = serverResult.error;
@@ -785,13 +814,13 @@ export async function executeOperatorWithContext(
     const [vctx, errors] = await validateOperatorInputs(
       operator,
       ctx,
-      resolvedInputs
+      resolvedInputs,
     );
     if (vctx.invalid) {
       console.error(`Invalid inputs for operator ${operatorURI}:`);
       console.error(errors);
       throw new Error(
-        `Failed to execute operator ${operatorURI}. See console for details.`
+        `Failed to execute operator ${operatorURI}. See console for details.`,
       );
     }
     try {
@@ -824,33 +853,15 @@ export async function executeOperatorWithContext(
     executor,
     error,
     delegated,
-    errorMessage
+    errorMessage,
   );
 }
-
-type CurrentContext = {
-  datasetName: string;
-  view: any;
-  extended: any;
-  filters: any;
-  selectedSamples: Set<string>;
-  selectedLabels: any;
-  currentSample: string;
-  viewName: string;
-  extendedSelection: {
-    selection: string[] | null;
-    scope: string;
-  };
-  state: any;
-  delegationTarget?: string;
-  activeFields: string[];
-};
 
 export async function resolveRemoteType(
   operatorURI,
   ctx: ExecutionContext,
   target: "inputs" | "outputs",
-  results: OperatorResult = null
+  results: OperatorResult = null,
 ) {
   operatorURI = resolveOperatorURI(operatorURI);
   const currentContext = ctx._currentContext;
@@ -869,10 +880,7 @@ export async function resolveRemoteType(
       request_delegation: ctx.requestDelegation,
       results: results ? results.result : null,
       target,
-      selected: currentContext.selectedSamples
-        ? Array.from(currentContext.selectedSamples)
-        : [],
-      selected_labels: formatSelectedLabels(currentContext.selectedLabels),
+      ...formatSelectionPayload(currentContext),
       view: currentContext.view,
       view_name: currentContext.viewName,
       group_slice: currentContext.groupSlice,
@@ -881,7 +889,7 @@ export async function resolveRemoteType(
       workspace_name: currentContext.workspaceName,
       prompt_id: ctx.promptId,
       active_fields: ctx.activeFields,
-    }
+    },
   );
 
   if (typeAsJSON && typeAsJSON.error) {
@@ -905,9 +913,17 @@ class Orchestrator {
     public availableOperators: string[],
     public createdAt: Date,
     public updatedAt: Date = null,
-    public deactivatedAt: Date = null
+    public deactivatedAt: Date = null,
   ) {}
-  static fromJSON(raw: any) {
+  static fromJSON(raw: {
+    id: string;
+    instance_id: string;
+    description?: string;
+    available_operators: string[];
+    created_at?: { $date: string };
+    updated_at?: { $date: string };
+    deactivated_at?: { $date: string };
+  }) {
     return new Orchestrator(
       raw.id,
       raw.instance_id,
@@ -915,7 +931,7 @@ class Orchestrator {
       raw.available_operators,
       parseDateOrNull(raw, "created_at"),
       parseDateOrNull(raw, "updated_at"),
-      parseDateOrNull(raw, "deactivated_at")
+      parseDateOrNull(raw, "deactivated_at"),
     );
   }
 }
@@ -925,13 +941,13 @@ class ExecutionOptions {
     public allowImmediateExecution: boolean,
     public allowDelegatedExecution: boolean,
     public availableOrchestrators: Orchestrator[] = [],
-    public defaultChoiceToDelegated: boolean = false
+    public defaultChoiceToDelegated: boolean = false,
   ) {}
 }
 
 export async function resolveExecutionOptions(
   operatorURI,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
 ) {
   operatorURI = resolveOperatorURI(operatorURI);
   const currentContext = ctx._currentContext;
@@ -948,10 +964,7 @@ export async function resolveExecutionOptions(
       operator_uri: operatorURI,
       params: ctx.params,
       request_delegation: ctx.requestDelegation,
-      selected: currentContext.selectedSamples
-        ? Array.from(currentContext.selectedSamples)
-        : [],
-      selected_labels: formatSelectedLabels(currentContext.selectedLabels),
+      ...formatSelectionPayload(currentContext),
       view: currentContext.view,
       view_name: currentContext.viewName,
       group_slice: currentContext.groupSlice,
@@ -959,7 +972,7 @@ export async function resolveExecutionOptions(
       spaces: currentContext.spaces,
       workspace_name: currentContext.workspaceName,
       active_fields: ctx.activeFields,
-    }
+    },
   );
 
   return new ExecutionOptions(
@@ -967,9 +980,9 @@ export async function resolveExecutionOptions(
     executionOptionsAsJSON.allow_immediate_execution,
     executionOptionsAsJSON.allow_delegated_execution,
     executionOptionsAsJSON?.available_orchestrators?.map(
-      Orchestrator.fromJSON
+      Orchestrator.fromJSON,
     ) || [],
-    executionOptionsAsJSON.default_choice_to_delegated
+    executionOptionsAsJSON.default_choice_to_delegated,
   );
 }
 export async function fetchRemotePlacements(ctx: ExecutionContext) {
@@ -983,10 +996,7 @@ export async function fetchRemotePlacements(ctx: ExecutionContext) {
       extended_selection: currentContext.extendedSelection,
       view: currentContext.view,
       filters: currentContext.filters,
-      selected: currentContext.selectedSamples
-        ? Array.from(currentContext.selectedSamples)
-        : [],
-      selected_labels: formatSelectedLabels(currentContext.selectedLabels),
+      ...formatSelectionPayload(currentContext),
       current_sample: currentContext.currentSample,
       view_name: currentContext.viewName,
       group_slice: currentContext.groupSlice,
@@ -994,7 +1004,7 @@ export async function fetchRemotePlacements(ctx: ExecutionContext) {
       spaces: currentContext.spaces,
       workspace_name: currentContext.workspaceName,
       active_fields: ctx.activeFields,
-    }
+    },
   );
   if (result && result.error) {
     throw new Error(result.error);
@@ -1026,7 +1036,7 @@ class QueueItem {
   constructor(
     public id: string,
     public request: InvocationRequest,
-    public callback?: ExecutionCallback
+    public callback?: ExecutionCallback,
   ) {}
   status: QueueItemStatus = QueueItemStatus.Pending;
   result: OperatorResult;
@@ -1112,7 +1122,7 @@ export class InvocationRequestQueue {
   }
   clean() {
     this._queue = this._queue.filter(
-      (d) => d.status !== QueueItemStatus.Completed
+      (d) => d.status !== QueueItemStatus.Completed,
     );
     this._notifySubscribers();
   }
@@ -1139,7 +1149,11 @@ export function getInvocationRequestQueue() {
 }
 
 class AbortableOperation {
-  constructor(public id: string, public params: any, public parser: any) {}
+  constructor(
+    public id: string,
+    public params: unknown,
+    public parser: { abort: () => void },
+  ) {}
   abort() {
     return this.parser.abort();
   }
@@ -1197,5 +1211,5 @@ export function abortOperationsByExpression(expression) {
 }
 
 type InvocationRequestQueueSubscriberType = (
-  queue: InvocationRequestQueue
+  queue: InvocationRequestQueue,
 ) => void;

@@ -6,7 +6,7 @@ export class UrlPom {
 
   constructor(
     private readonly page: Page,
-    private readonly eventUtils: EventUtils
+    private readonly eventUtils: EventUtils,
   ) {
     this.assert = new UrlAsserter(this);
   }
@@ -35,12 +35,8 @@ export class UrlPom {
     return this.searchParams.get("view");
   }
 
-  async pageChange<T>(wrap: () => Promise<T>): Promise<T> {
-    const pageChange =
-      this.eventUtils.getEventReceivedPromiseForPredicate("page-change");
-    const result = await wrap();
-    await pageChange;
-    return result;
+  pageChange<T>(wrap: () => Promise<T>): Promise<T> {
+    return this.eventUtils.after("page-change", wrap);
   }
 
   async back() {

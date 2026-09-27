@@ -36,10 +36,17 @@ export const useUpdateSamples = () => {
               }
             }
           }
+
+          // For generated views (patches/clips/frames), delete the source
+          // sample's cached modal record so the next modal open fetches fresh data
+          const sourceSampleId = (sample as Record<string, unknown>)._sample_id;
+          if (typeof sourceSampleId === "string") {
+            store.delete(`${sourceSampleId}-modal`);
+          }
         }
       });
     },
-    [environment]
+    [environment],
   );
 };
 

@@ -1,9 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { LABEL_TYPE_OPTIONS, LABEL_TYPE_OPTIONS_VIDEO } from "./constants";
 import {
+  createDefaultFormData,
+  defaultClassesComponent,
   formatAttributeCount,
   formatSchemaCount,
   getAttributeTypeLabel,
   getClassNameError,
+  getLabelTypeOptions,
+  reconcileComponent,
+  toAttributeConfig,
+  toFormData,
+  validateFieldName,
 } from "./utils";
 
 describe("getAttributeTypeLabel", () => {
@@ -51,19 +59,19 @@ describe("getClassNameError", () => {
 
   it("should return error for empty class name", () => {
     expect(getClassNameError("", existingClasses)).toBe(
-      "Class name cannot be empty"
+      "Class name cannot be empty",
     );
     expect(getClassNameError("   ", existingClasses)).toBe(
-      "Class name cannot be empty"
+      "Class name cannot be empty",
     );
   });
 
   it("should return error for duplicate class name", () => {
     expect(getClassNameError("ClassA", existingClasses)).toBe(
-      "Class name already exists"
+      "Class name already exists",
     );
     expect(getClassNameError("ClassB", existingClasses)).toBe(
-      "Class name already exists"
+      "Class name already exists",
     );
   });
 
@@ -74,14 +82,14 @@ describe("getClassNameError", () => {
 
   it("should still detect duplicates when editing different class", () => {
     expect(getClassNameError("ClassB", existingClasses, "ClassA")).toBe(
-      "Class name already exists"
+      "Class name already exists",
     );
   });
 
   it("should trim whitespace when checking", () => {
     expect(getClassNameError("  NewClass  ", existingClasses)).toBe(null);
     expect(getClassNameError("  ClassA  ", existingClasses)).toBe(
-      "Class name already exists"
+      "Class name already exists",
     );
   });
 });
@@ -107,5 +115,137 @@ describe("formatSchemaCount", () => {
     expect(formatSchemaCount(0)).toBe("0 schemas");
     expect(formatSchemaCount(2)).toBe("2 schemas");
     expect(formatSchemaCount(5)).toBe("5 schemas");
+  });
+});
+
+describe("dynamic attribute flag", () => {
+  it("defaults to false for a new attribute", () => {
+    expect(createDefaultFormData().dynamic).toBe(false);
+  });
+
+  it("hydrates the form from a dynamic config", () => {
+    const form = toFormData({
+      name: "turn_signal",
+      type: "str",
+      dynamic: true,
+    });
+    expect(form.dynamic).toBe(true);
+  });
+
+  it("defaults the form to false when the config omits dynamic", () => {
+    const form = toFormData({ name: "color", type: "str" });
+    expect(form.dynamic).toBe(false);
+  });
+
+  it("serializes a dynamic attribute and omits it when false", () => {
+    const dynamic = toAttributeConfig({
+      ...createDefaultFormData(),
+      name: "turn_signal",
+      type: "str",
+      dynamic: true,
+    });
+    expect(dynamic.dynamic).toBe(true);
+
+    const static_ = toAttributeConfig({
+      ...createDefaultFormData(),
+      name: "color",
+      type: "str",
+    });
+    expect(static_.dynamic).toBeUndefined();
+  });
+});
+
+describe("validateFieldName", () => {
+  it("rejects '.' for non-video media", () => {
+    expect(validateFieldName("frames.detections", null, "image")).toMatch(
+      /Invalid field name/,
+    );
+    expect(validateFieldName("detections", null, "image")).toBeNull();
+  });
+
+  it("allows a single 'frames.' prefix on video", () => {
+    expect(validateFieldName("frames.detections", null, "video")).toBeNull();
+    expect(validateFieldName("detections", null, "video")).toBeNull();
+  });
+
+  it("rejects deeper paths and a bare prefix on video", () => {
+    expect(validateFieldName("frames.detections.foo", null, "video")).toMatch(
+      /Invalid field name/,
+    );
+    expect(validateFieldName("frames.", null, "video")).toMatch(
+      /Invalid field name/,
+    );
+  });
+
+  it("flags duplicate field names", () => {
+    expect(
+      validateFieldName(
+        "frames.detections",
+        { "frames.detections": {} },
+        "video",
+      ),
+    ).toBe("Field name already exists");
+  });
+});
+
+describe("getLabelTypeOptions", () => {
+  it("offers the spatial set for a video frame field", () => {
+    expect(getLabelTypeOptions("video", true)).toBe(LABEL_TYPE_OPTIONS);
+  });
+
+  it("limits a sample-level video field to clip-level types", () => {
+    expect(getLabelTypeOptions("video", false)).toBe(LABEL_TYPE_OPTIONS_VIDEO);
+  });
+});
+
+describe("defaultClassesComponent", () => {
+  const classes = (n: number) => Array.from({ length: n }, (_, i) => `c${i}`);
+
+  it("is radio up to the threshold and dropdown past it", () => {
+    expect(defaultClassesComponent([])).toBe("radio");
+    expect(defaultClassesComponent(classes(5))).toBe("radio");
+    expect(defaultClassesComponent(classes(6))).toBe("dropdown");
+  });
+});
+
+describe("reconcileComponent", () => {
+  const classes = (n: number) => Array.from({ length: n }, (_, i) => `c${i}`);
+
+  it("derives radio for a text component with up to 5 classes", () => {
+    expect(
+      reconcileComponent({ component: "text", classes: classes(5) }).component,
+    ).toBe("radio");
+  });
+
+  it("derives dropdown for a text component with more than 5 classes", () => {
+    expect(
+      reconcileComponent({ component: "text", classes: classes(6) }).component,
+    ).toBe("dropdown");
+  });
+
+  it("treats a missing component like text", () => {
+    expect(reconcileComponent({ classes: classes(30) }).component).toBe(
+      "dropdown",
+    );
+  });
+
+  it("preserves an explicit radio or dropdown regardless of class count", () => {
+    expect(
+      reconcileComponent({ component: "radio", classes: classes(30) })
+        .component,
+    ).toBe("radio");
+    expect(
+      reconcileComponent({ component: "dropdown", classes: classes(2) })
+        .component,
+    ).toBe("dropdown");
+  });
+
+  it("resets to text and strips classes when none remain", () => {
+    expect(reconcileComponent({ component: "radio", classes: [] })).toEqual({
+      component: "text",
+    });
+    expect(reconcileComponent({ component: "text", classes: [] })).toEqual({
+      component: "text",
+    });
   });
 });

@@ -5,6 +5,11 @@ Getting Started Guides
 
 .. default-role:: code
 
+.. meta::
+    :description: Step-by-step guided learning paths for FiftyOne,
+        covering dataset curation, object detection, segmentation, model
+        evaluation, and more.
+
 Welcome to FiftyOne's guided learning experiences! These step-by-step tutorials will walk you through complete workflows, helping you master FiftyOne's capabilities through hands-on practice.
 
 Each guide is designed as a sequential learning experience with navigation between steps, allowing you to progress through the material at your own pace.
@@ -33,6 +38,13 @@ Each guide is designed as a sequential learning experience with navigation betwe
     <div class="list">
 
 .. Add guide cards below
+
+.. customcarditem::
+    :header: Getting Started with Enterprise
+    :description: Create your first dataset in FiftyOne Enterprise. Learn to configure cloud credentials, install the SDK, import samples, and schedule metadata computation.
+    :link: ../enterprise/getting_started.html
+    :image: https://docs.voxel51.com/_images/getting_started_cloud_creds.gif
+    :tags: FiftyOne-Enterprise
 
 .. customcarditem::
     :header: Auto Labeling Guide
@@ -129,6 +141,7 @@ Each guide is designed as a sequential learning experience with navigation betwe
    :maxdepth: 1
    :hidden:
 
+   Getting Started with Enterprise <../enterprise/getting_started>
    Auto Labeling Guide <auto_labeling/index>
    Annotation Guide __SUB_NEW__ <annotation/index>
    Object Detection Guide <object_detection/index>

@@ -23,7 +23,7 @@ export class GridActionsRowPom {
 
   get filtersBookmark() {
     return this.gridActionsRow.getByTestId(
-      "action-convert-filters-to-view-stages"
+      "action-convert-filters-to-view-stages",
     );
   }
 
@@ -41,10 +41,6 @@ export class GridActionsRowPom {
 
   async toggleCreateDynamicGroups() {
     return this.openAction("action-create-dynamic-groups");
-  }
-
-  async toggleSortBySimilarity() {
-    return this.openAction("action-sort-by-similarity");
   }
 
   async toggleToClipsOrPatches() {

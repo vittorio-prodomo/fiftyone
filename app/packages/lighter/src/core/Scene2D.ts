@@ -2,29 +2,35 @@
  * Copyright 2017-2026, Voxel51, Inc.
  */
 
+import { Action, CommandContextManager } from "@fiftyone/commands";
 import {
-  clearChannel,
   EventDispatcher,
   EventHandler,
+  clearChannel,
   getEventBus,
 } from "@fiftyone/events";
 import { AddOverlayCommand } from "../commands/AddOverlayCommand";
-import {
-  MoveOverlayCommand,
-  type Movable,
-} from "../commands/MoveOverlayCommand";
+import { MoveOverlayCommand } from "../commands/MoveOverlayCommand";
+import { RotateOverlayCommand } from "../commands/RotateOverlayCommand";
+import { PaintStrokeCommand } from "../commands/PaintStrokeCommand";
 import { RemoveOverlayCommand } from "../commands/RemoveOverlayCommand";
+import { DetectionOverlay } from "../overlay/DetectionOverlay";
 import {
+  TransformOptions,
   TransformOverlayCommand,
-  type TransformOptions,
 } from "../commands/TransformOverlayCommand";
 import { STROKE_WIDTH } from "../constants";
+import type { ViewportState } from "../types";
 import type { LighterEventGroup } from "../events";
-import type { InteractionHandler } from "../interaction/InteractionManager";
+import type {
+  EmptyCanvasClickHandler,
+  InteractionHandler,
+} from "../interaction/InteractionManager";
 import { InteractionManager } from "../interaction/InteractionManager";
-import { InteractiveDetectionHandler } from "../interaction/InteractiveDetectionHandler";
+import type { InteractiveDetectionHandler } from "../interaction/InteractiveDetectionHandler";
 import { BaseOverlay } from "../overlay/BaseOverlay";
-import { ClassificationOverlay } from "../overlay/ClassificationOverlay";
+import { CONTAINS } from "./containment";
+export { CONTAINS };
 import type { Selectable } from "../selection/Selectable";
 import type { SelectionOptions } from "../selection/SelectionManager";
 import { SelectionManager } from "../selection/SelectionManager";
@@ -35,6 +41,7 @@ import type {
   Hoverable,
   Point,
   Rect,
+  Rotatable,
   Spatial,
 } from "../types";
 import { generateColorFromId } from "../utils/color";
@@ -49,42 +56,28 @@ import {
   RenderingStateManager,
 } from "./RenderingStateManager";
 import type { Scene2DConfig, SceneOptions } from "./SceneConfig";
-import { CommandContextManager, Action } from "@fiftyone/commands";
 
 export const TypeGuards = {
   isHoverable: (
-    body: Partial<BaseOverlay & Hoverable>
+    body: Partial<BaseOverlay & Hoverable>,
   ): body is BaseOverlay & Hoverable =>
     "getTooltipInfo" in body &&
     "onHoverEnter" in body &&
     "onHoverLeave" in body &&
     "onHoverMove" in body,
   isSelectable: (
-    body: BaseOverlay | InteractionHandler
+    body: BaseOverlay | InteractionHandler,
   ): body is BaseOverlay & InteractionHandler & Selectable =>
     "id" in body && "isSelected" in body && "setSelected" in body,
 
   isSpatial: (
-    body: BaseOverlay | InteractionHandler
-  ): body is BaseOverlay & Spatial =>
-    "getRelativeBounds" in body && "setAbsoluteBounds" in body,
+    body: BaseOverlay | InteractionHandler,
+  ): body is BaseOverlay & Spatial => "bounds" in body,
 
-  isTransformable: (
-    body: BaseOverlay | InteractionHandler
-  ): body is BaseOverlay & Movable =>
-    "getPosition" in body &&
-    "setPosition" in body &&
-    "getBounds" in body &&
-    "setBounds" in body,
-
-  isMovable: (
-    body: BaseOverlay | InteractionHandler
-  ): body is BaseOverlay & Movable =>
-    "id" in body &&
-    "getPosition" in body &&
-    "setPosition" in body &&
-    "getBounds" in body &&
-    "setBounds" in body,
+  isRotatable: (
+    body: BaseOverlay | InteractionHandler,
+  ): body is BaseOverlay & Rotatable =>
+    "getRotation" in body && "setRotation" in body,
 
   isInteractionHandler: (value: unknown): value is InteractionHandler =>
     typeof value === "object" &&
@@ -98,13 +91,15 @@ export const TypeGuards = {
 };
 
 /**
- * Const enum for point containment levels.
+ * Type guard that narrows `Rect | undefined` to `Rect` and confirms the rect
+ * has non-zero area.
  */
-export const enum CONTAINS {
-  NONE = 0,
-  CONTENT = 1,
-  BORDER = 2,
-}
+const isUsableBounds = (bounds: Rect | undefined): bounds is Rect => {
+  if (!bounds) return false;
+  return (
+    BaseOverlay.validBounds(bounds) && bounds.width !== 0 && bounds.height !== 0
+  );
+};
 
 /**
  * Interface for overlay ordering state.
@@ -134,12 +129,29 @@ export interface OverlayOrderOptions {
 
 /**
  * Interface for render callbacks that can be registered to run during the render loop.
+ *
+ * SYNCHRONOUS by contract. The frame runs inside Pixi's ticker, ahead of
+ * Pixi's own LOW-priority render in the same pass — a callback that suspended
+ * the frame would push every scene-graph mutation past that render, which is
+ * exactly the phase inversion this loop exists to avoid. Work that must await
+ * belongs off the render path.
  */
 export interface RenderCallback {
   id: string;
-  callback: () => void | Promise<void>;
+  callback: () => void;
   phase: "before" | "after";
 }
+
+/**
+ * Rejects a thenable return.
+ *
+ * `callback: () => void` is not enough on its own: TypeScript lets a
+ * `Promise`-returning function satisfy a `() => void` signature, so an `async`
+ * callback would type-check and then silently reintroduce the phase inversion
+ * this loop exists to prevent. Applied at `registerRenderCallback`, where the
+ * return type is inferable, it fails at the call site instead.
+ */
+type NotPromise<T> = T extends PromiseLike<unknown> ? never : T;
 
 /**
  * 2D scene that manages overlays, rendering, selection, coordinate system, and undo/redo operations.
@@ -154,6 +166,8 @@ export class Scene2D {
   private overlayOrder: string[] = [];
   private renderingState = new RenderingStateManager();
   private sceneOptions?: SceneOptions;
+  /** See {@link setReadOnly}. */
+  private readOnlyMode = false;
   private selectionManager: SelectionManager;
   private renderCallbacks = new Map<string, RenderCallback>();
   private colorMappingContext?: ColorMappingContext;
@@ -161,6 +175,10 @@ export class Scene2D {
   private rotation: number = 0;
   private interactiveMode: boolean = false;
   private interactiveHandler?: InteractionHandler;
+  // When an external authority (the annotation engine) owns undo/redo, Lighter
+  // must not also push its own edit commands — the engine captures the same
+  // edits as value-based entries, so a self-push double-counts every gesture.
+  private externalUndoAuthority: boolean = false;
   private isRenderLoopActive: boolean = false;
   private abortController = new AbortController();
   private readonly sceneId: string;
@@ -181,8 +199,21 @@ export class Scene2D {
       config.canvas,
       this.selectionManager,
       config.renderer,
-      this.eventChannel
+      this.eventChannel,
     );
+
+    // A filtered-out label must not be clickable at its old position, or
+    // hiding it in the sidebar makes empty canvas do something. Set once as a
+    // live closure over `this` rather than re-pushed on every options change:
+    // `shouldShowOverlay` already reads `this.sceneOptions` fresh each call,
+    // so this predicate stays correct as options change without needing its
+    // own update path. `id` may not resolve to a registered overlay at all —
+    // a self-managed draw/paint tool handler is not one — in which case there
+    // is nothing to filter and the handler stays hit-testable.
+    this.interactionManager.setVisibilityPredicate((id) => {
+      const overlay = this.overlays.get(id);
+      return overlay ? this.shouldShowOverlay(overlay) : true;
+    });
 
     this.eventBus = getEventBus<LighterEventGroup>(this.eventChannel);
 
@@ -191,15 +222,24 @@ export class Scene2D {
       "lighter:canonical-media-bounds-changed",
       (event) => {
         this.coordinateSystem.updateTransform(event.bounds);
-        this.updateAllSpatialOverlays();
-        this.updateClassifications();
-      }
+
+        this.overlays.forEach((overlay) => {
+          overlay.markDirty();
+        });
+      },
     );
 
     // Listen for scene options changes to trigger re-rendering
     this.registerEventHandler("lighter:scene-options-changed", (event) => {
-      const { activePaths, showOverlays, alpha } = event;
-      this.updateOptions({ activePaths, showOverlays, alpha });
+      // `updateOptions` REPLACES `sceneOptions` wholesale (see its own doc
+      // comment) — every field this handler receives has to be re-listed
+      // here or it is silently dropped the next time ANY option changes,
+      // `filter` included. `readOnly` avoided this trap entirely by living
+      // in its own field instead of this bag; `filter` doesn't need that,
+      // since it belongs with `activePaths`/`showOverlays` as one more
+      // per-render display option, but it does need to be named here.
+      const { activePaths, showOverlays, alpha, filter } = event;
+      this.updateOptions({ activePaths, showOverlays, alpha, filter });
 
       this.overlays.forEach((overlay) => {
         overlay.markDirty();
@@ -236,15 +276,13 @@ export class Scene2D {
 
     // Listen for OVERLAY_ESTABLISH events to unset bounds of new overlay
     this.registerEventHandler("lighter:overlay-establish", (event) => {
-      const { overlay, absoluteBounds, relativeBounds } = event;
+      if (this.externalUndoAuthority) return;
 
-      if (overlay) {
-        const addCommand = new AddOverlayCommand(
-          this,
-          overlay,
-          absoluteBounds,
-          relativeBounds
-        );
+      const { handler, bounds } = event;
+
+      if (handler) {
+        const addCommand = new AddOverlayCommand(this, handler, bounds);
+
         CommandContextManager.instance()
           .getActiveContext()
           .pushUndoable(addCommand);
@@ -253,19 +291,21 @@ export class Scene2D {
 
     // Listen for OVERLAY_DRAG_END events to trigger re-rendering of overlays that are currently dragged
     this.registerEventHandler("lighter:overlay-drag-end", (event) => {
+      if (this.externalUndoAuthority) return;
+
       const overlay = this.getOverlay(event.id);
-      if (overlay && TypeGuards.isMovable(overlay)) {
-        const { startBounds, absoluteBounds: endBounds } = event;
+      if (overlay && TypeGuards.isSpatial(overlay)) {
+        const { startBounds, bounds } = event;
         const moved =
-          Math.abs(startBounds.x - endBounds.x) > 1 ||
-          Math.abs(startBounds.y - endBounds.y) > 1;
+          Math.abs(startBounds.x - bounds.x) > 1 ||
+          Math.abs(startBounds.y - bounds.y) > 1;
 
         if (moved) {
           const moveCommand = new MoveOverlayCommand(
             overlay,
             event.id,
             startBounds,
-            endBounds
+            bounds,
           );
           CommandContextManager.instance()
             .getActiveContext()
@@ -276,9 +316,11 @@ export class Scene2D {
 
     // Listen for OVERLAY_RESIZE_END events to trigger re-rendering of overlays that are currently resized
     this.registerEventHandler("lighter:overlay-resize-end", (event) => {
+      if (this.externalUndoAuthority) return;
+
       const overlay = this.getOverlay(event.id);
-      if (overlay && TypeGuards.isMovable(overlay)) {
-        const { startBounds, absoluteBounds: endBounds } = event;
+      if (overlay && TypeGuards.isSpatial(overlay)) {
+        const { startBounds, bounds: endBounds } = event;
         const moved =
           Math.abs(startBounds.x - endBounds.x) > 1 ||
           Math.abs(startBounds.y - endBounds.y) > 1 ||
@@ -290,7 +332,7 @@ export class Scene2D {
             overlay,
             event.id,
             startBounds,
-            endBounds
+            endBounds,
           );
           CommandContextManager.instance()
             .getActiveContext()
@@ -298,6 +340,61 @@ export class Scene2D {
         }
       }
     });
+
+    // Listen for OVERLAY_ROTATE_END events to push undo/redo commands
+    this.registerEventHandler("lighter:overlay-rotate-end", (event) => {
+      if (this.externalUndoAuthority) return;
+
+      const overlay = this.getOverlay(event.overlayId);
+      if (overlay && TypeGuards.isRotatable(overlay)) {
+        const { startRotation, rotation } = event;
+
+        if (Math.abs(startRotation - rotation) > 1e-4) {
+          const rotateCommand = new RotateOverlayCommand(
+            overlay,
+            event.overlayId,
+            startRotation,
+            rotation,
+          );
+          CommandContextManager.instance()
+            .getActiveContext()
+            .pushUndoable(rotateCommand);
+        }
+      }
+    });
+
+    // Listen for paint stroke end events to push undo/redo commands
+    this.registerEventHandler(
+      "lighter:overlay-paint-end",
+      ({ id, paintStrokeData, isEstablishing }) => {
+        if (this.externalUndoAuthority) return;
+
+        if (!id || !paintStrokeData) return;
+
+        // First-stroke-of-a-new-mask: the AddOverlayCommand from the
+        // subsequent overlay-establish will register the undo/redo command.
+        if (isEstablishing) return;
+
+        const overlay = this.getOverlay(id);
+        const { beforeBounds, beforeSnapshot, afterBounds, afterSnapshot } =
+          paintStrokeData;
+
+        if (overlay && overlay instanceof DetectionOverlay) {
+          const command = new PaintStrokeCommand(
+            overlay,
+            id,
+            beforeSnapshot,
+            beforeBounds,
+            afterSnapshot,
+            afterBounds,
+          );
+
+          CommandContextManager.instance()
+            .getActiveContext()
+            .pushUndoable(command);
+        }
+      },
+    );
 
     // Listen for DO_OVERLAY_HOVER events to force hover state
     this.registerEventHandler("lighter:do-overlay-hover", (event) => {
@@ -335,7 +432,7 @@ export class Scene2D {
    */
   private registerEventHandler<K extends keyof LighterEventGroup>(
     event: K,
-    handler: EventHandler<LighterEventGroup[K]>
+    handler: EventHandler<LighterEventGroup[K]>,
   ): void {
     const offHandler = this.eventBus.on(event, handler);
     this.abortController.signal.addEventListener("abort", offHandler);
@@ -392,7 +489,7 @@ export class Scene2D {
    */
   private createFieldBins(
     overlays: Map<string, BaseOverlay>,
-    activePaths: string[]
+    activePaths: string[],
   ): Record<string, string[]> {
     const bins: Record<string, string[]> = {};
 
@@ -417,7 +514,7 @@ export class Scene2D {
   private buildInitialOrder(
     bins: Record<string, string[]>,
     activePaths: string[],
-    overlays?: Map<string, BaseOverlay>
+    overlays?: Map<string, BaseOverlay>,
   ): string[] {
     const ordered: string[] = [];
 
@@ -441,11 +538,11 @@ export class Scene2D {
    */
   private addRemainingOverlays(
     ordered: string[],
-    overlays: Map<string, BaseOverlay>
+    overlays: Map<string, BaseOverlay>,
   ): string[] {
     const result = [...ordered];
 
-    overlays.forEach((overlay, id) => {
+    overlays.forEach((_overlay, id) => {
       if (!result.includes(id)) {
         result.push(id);
       }
@@ -477,7 +574,7 @@ export class Scene2D {
    */
   private rotateOverlays(
     overlays: string[],
-    rotate: number
+    rotate: number,
   ): [string[], number] {
     if (overlays.length === 0) {
       return [overlays, 0];
@@ -511,7 +608,7 @@ export class Scene2D {
 
     const newRotation = Math.min(
       this.rotation + 1,
-      this.overlayOrder.length - 1
+      this.overlayOrder.length - 1,
     );
 
     if (newRotation !== this.rotation) {
@@ -643,6 +740,90 @@ export class Scene2D {
   }
 
   /**
+   * Returns the current zoom and pan state of the scene's renderer.
+   * Use this to snapshot the viewport before unmounting the scene.
+   */
+  getViewportState(): ViewportState {
+    return this.config.renderer.getViewportState();
+  }
+
+  /**
+   * Restores a previously captured zoom and pan state to the scene's renderer.
+   * Call this after the renderer is initialized and the render loop has started.
+   */
+  setViewportState(state: ViewportState): void {
+    this.config.renderer.setViewportState(state);
+  }
+
+  /**
+   * Computes the smallest rectangle in world coordinates that
+   * contains all `Spatial` overlays in the scene (excluding canonical media).
+   * Only overlays with non-zero area bounds are included.
+   *
+   * @returns The union bounding rect, or `null` if no qualifying overlays exist.
+   */
+  getContentBounds(): Rect | null {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let found = false;
+
+    this.overlays.forEach((overlay, id) => {
+      if (id === this.canonicalMediaId) return;
+      if (!TypeGuards.isSpatial(overlay)) return;
+
+      const bounds = overlay.bounds;
+      if (!isUsableBounds(bounds)) return;
+
+      minX = Math.min(minX, bounds.x);
+      minY = Math.min(minY, bounds.y);
+      maxX = Math.max(maxX, bounds.x + bounds.width);
+      maxY = Math.max(maxY, bounds.y + bounds.height);
+      found = true;
+    });
+
+    if (!found) return null;
+
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  /**
+   * Adjusts the viewport so all `Spatial` overlays are centered and fully
+   * visible. A no-op when there are no qualifying overlays.
+   *
+   * @param padding - Fraction of the viewport to keep as empty space on each
+   *   side (0–1). Passed directly to `Renderer2D.fitToRect`. Defaults to 0.
+   */
+  fitToContent(padding?: number): void {
+    const bounds = this.getContentBounds();
+    if (bounds) {
+      this.config.renderer.fitToRect(bounds, padding);
+    }
+  }
+
+  /**
+   * Reset the scene's zoom level to 100% and clears pan translation.
+   */
+  resetZoomPan(): void {
+    this.config.renderer.resetZoomPan();
+  }
+
+  /**
+   * Increase the viewport zoom level (zoom in).
+   */
+  zoomIn(): void {
+    this.config.renderer.zoomIn();
+  }
+
+  /**
+   * Decrease the viewport zoom level (zoom out).
+   */
+  zoomOut(): void {
+    this.config.renderer.zoomOut();
+  }
+
+  /**
    * Gets the canvas bounding rectangle for coordinate conversion.
    * This is a safer alternative to getCanvas() when you only need the bounds.
    * @returns The DOMRect of the canvas element.
@@ -661,10 +842,94 @@ export class Scene2D {
   }
 
   /**
+   * Read-only mode: overlays stay selectable and hoverable, but none of them
+   * can be moved, resized, or drawn. See
+   * {@link InteractionManager.setReadOnly}.
+   *
+   * Deliberately NOT part of {@link SceneOptions}: that object is replaced
+   * wholesale by `updateOptions`, and the `lighter:scene-options-changed`
+   * handler rebuilds it from only `activePaths` / `showOverlays` / `alpha` —
+   * a read-only flag living there would be silently dropped the first time
+   * the sidebar toggled a field. This is a surface-lifetime property, not a
+   * display option, so it gets its own storage.
+   */
+  setReadOnly(readOnly: boolean): void {
+    this.readOnlyMode = readOnly;
+    this.interactionManager.setReadOnly(readOnly);
+    for (const overlay of this.overlays.values()) {
+      this.applyReadOnlyTo(overlay);
+    }
+  }
+
+  /**
+   * Strip an overlay's move affordances while the scene is read-only.
+   *
+   * This is presentation, not enforcement — `InteractionManager` already
+   * refuses the gesture. But `DetectionOverlay` gates its resize handles and
+   * selection scrim on `isDraggable || isResizeable`, so leaving those set
+   * would draw grab handles for a drag that cannot happen. Clearing them
+   * makes a selected label render as a plain highlighted box.
+   *
+   * One-way by design: read-only is a surface-lifetime property, so this
+   * never re-enables anything an overlay opted out of on its own.
+   */
+  private applyReadOnlyTo(overlay: BaseOverlay): void {
+    if (!this.readOnlyMode) {
+      return;
+    }
+    // Not on BaseOverlay — only the spatial overlays that can move define
+    // them, so feature-detect rather than widen the base type.
+    const movable = overlay as Partial<{
+      setDraggable(value: boolean): void;
+      setResizeable(value: boolean): void;
+    }>;
+    movable.setDraggable?.(false);
+    movable.setResizeable?.(false);
+  }
+
+  /** Whether geometry mutation is blocked on this scene. */
+  isReadOnly(): boolean {
+    return this.readOnlyMode;
+  }
+
+  /**
+   * Allows more than one overlay to be selected at a time.
+   *
+   * A surface-lifetime property, stored the same way and for the same reason
+   * as {@link setReadOnly}: `SceneOptions` is replaced wholesale by
+   * `updateOptions`, so a flag living there would be dropped the first time
+   * the sidebar toggled a field.
+   *
+   * On for surfaces that select labels rather than edit them — video Explore,
+   * where clicking boxes builds up `selectedLabels` for tagging. Off for the
+   * annotation surfaces, whose drag / resize / paint handlers act on a single
+   * selected overlay.
+   *
+   * This is the ONE switch for that behavior, and it reaches past the scene:
+   * `InteractionManager` reads it to decide whether a click toggles an overlay
+   * or replaces the selection, and the annotation engine's Lighter bridge
+   * reads it back off the scene to decide whether a click is additive in the
+   * engine's active set. Everything that has to agree about "can this surface
+   * hold several selected labels?" derives from here rather than being told
+   * separately, because a surface that set only some of them would show a
+   * canvas that collapses to one highlighted overlay while the other layers
+   * accumulate.
+   */
+  setMultipleSelection(multipleSelection: boolean): void {
+    this.selectionManager.setMultipleSelection(multipleSelection);
+  }
+
+  /** Whether this scene allows more than one overlay to be selected. */
+  isMultipleSelection(): boolean {
+    return this.selectionManager.isMultipleSelection();
+  }
+
+  /**
    * Determines if overlay order should be recalculated based on cursor position.
    * Only recalculates if the cursor is over a non-canonical overlay.
    * @returns True if overlay order should be recalculated.
    */
+  // @ts-expect-error unused — overlay-order recalculation not yet wired up
   private shouldRecalculateOverlayOrder(): boolean {
     const pixelCoordinates = this.interactionManager.getPixelCoordinates();
     if (!pixelCoordinates) {
@@ -778,12 +1043,8 @@ export class Scene2D {
     });
 
     // Apply rotation if needed
-    let newRotate = orderState.rotate;
     if (orderState.rotate !== 0) {
-      [contained, newRotate] = this.rotateOverlays(
-        contained,
-        orderState.rotate
-      );
+      [contained] = this.rotateOverlays(contained, orderState.rotate);
     }
 
     // Handle hover-only mode
@@ -894,14 +1155,28 @@ export class Scene2D {
     return finalStyle;
   }
 
+  /**
+   * The tick handler is SYNCHRONOUS, and must stay that way.
+   *
+   * Pixi's `TickerPlugin` registers its own `render` on this same ticker at
+   * `UPDATE_PRIORITY.LOW`, while this handler sits at the default `NORMAL` —
+   * so one ticker pass is meant to run "mutate the scene graph, then present
+   * it". An `async` handler returns at its first `await` and hands the rest of
+   * the frame to the microtask queue, which drains AFTER the ticker's
+   * synchronous phase — i.e. after Pixi has already presented. Every overlay
+   * mutation then lands a phase late, and because overlays paint by disposing
+   * their container and rebuilding it, any present caught between the dispose
+   * and the rebuild shows a hole. Staying synchronous is what keeps the whole
+   * frame — dispose included — inside one pass, invisible to the present.
+   */
   public async startRenderLoop(): Promise<void> {
     if (this.isRenderLoopActive) {
       return;
     }
 
     this.isRenderLoopActive = true;
-    this.config.renderer.addTickHandler(async () => {
-      await this.renderFrame();
+    this.config.renderer.addTickHandler(() => {
+      this.renderFrame();
     });
   }
 
@@ -918,14 +1193,17 @@ export class Scene2D {
    * @param callback - The callback configuration.
    * @returns A function to unregister the callback.
    */
-  registerRenderCallback(
-    callback: Omit<RenderCallback, "id"> & { id?: string }
+  registerRenderCallback<R>(
+    callback: Omit<RenderCallback, "id" | "callback"> & {
+      id?: string;
+      callback: () => NotPromise<R>;
+    },
   ): () => void {
     const id = callback.id || `render-callback-${Date.now()}-${Math.random()}`;
 
     const renderCallback: RenderCallback = {
       id,
-      callback: callback.callback,
+      callback: callback.callback as () => void,
       phase: callback.phase,
     };
 
@@ -947,19 +1225,14 @@ export class Scene2D {
    * Executes render callbacks for a specific phase.
    * @param phase - The phase to execute callbacks for.
    */
-  private async executeRenderCallbacks(
-    phase: "before" | "after"
-  ): Promise<void> {
+  private executeRenderCallbacks(phase: "before" | "after"): void {
     const callbacks = Array.from(this.renderCallbacks.values()).filter(
-      (callback) => callback.phase === phase
+      (callback) => callback.phase === phase,
     );
 
     for (const callback of callbacks) {
       try {
-        const result = callback.callback();
-        if (result instanceof Promise) {
-          await result;
-        }
+        callback.callback();
       } catch (error) {
         console.error(`Error in render callback ${callback.id}:`, error);
         // Continue with other callbacks even if one fails
@@ -978,7 +1251,7 @@ export class Scene2D {
         this,
         overlay,
         undefined,
-        undefined
+        undefined,
       );
       this.executeCommand(command);
       return;
@@ -990,41 +1263,36 @@ export class Scene2D {
 
     this.renderingState.setStatus(overlay.id, OVERLAY_STATUS_PENDING);
     // Inject renderer, resource loader, and scene ID into overlay
+    overlay.setCoordinateSystem(this.coordinateSystem);
     overlay.setRenderer(this.config.renderer);
     overlay.setResourceLoader(this.config.resourceLoader);
     overlay.setEventChannel(this.eventChannel);
+    overlay.rehydrateMask?.();
+    this.applyReadOnlyTo(overlay);
 
     // Add to internal tracking
     this.overlays.set(overlay.id, overlay);
 
-    // Update coordinates if spatial and canonical media is set
-    if (TypeGuards.isSpatial(overlay) && this.canonicalMedia) {
-      this.updateSpatialOverlayCoordinates(overlay);
-    }
-
     // Register with managers first
     this.interactionManager.addHandler(overlay);
-    if (TypeGuards.isSelectable(overlay)) {
+    // `isSelectable` is structural (has the Selectable methods); honor an
+    // overlay's opt-out via its selection priority (a `selectable: false`
+    // overlay reports < 0). Without this a tool overlay like the point-selection
+    // keypoint scaffold would join the single-selection set and steal/clear the
+    // engine anchor from the label being annotated.
+    if (
+      TypeGuards.isSelectable(overlay) &&
+      overlay.getSelectionPriority() >= 0
+    ) {
       this.selectionManager.addSelectable(overlay);
     }
 
     // Recalculate overlay order to maintain proper z-ordering
     this.recalculateOverlayOrder();
 
-    // Mark sibling classifications dirty
-    // so new overlay doesn't...overlay them
-    if (overlay.getOverlayType() === "ClassificationOverlay") {
-      [...this.overlays.values()]
-        .filter(
-          (sibling) =>
-            sibling !== overlay &&
-            sibling.getOverlayType() === "ClassificationOverlay"
-        )
-        .forEach((sibling) => sibling.markDirty());
-    }
-
     this.eventBus.dispatch("lighter:overlay-added", {
       id: overlay.id,
+      overlayId: overlay.id,
       overlay,
     });
   }
@@ -1033,8 +1301,13 @@ export class Scene2D {
    * Removes an overlay from the scene.
    * @param id - The ID of the overlay to remove.
    * @param withUndo - Whether to track this operation for undo/redo.
+   * @param lifecycle - Whether this is a lifecycle event (not user-driven)
    */
-  removeOverlay(id: string, withUndo: boolean = false): void {
+  removeOverlay(
+    id: string,
+    withUndo: boolean = false,
+    lifecycle: boolean = false,
+  ): void {
     if (withUndo) {
       const overlay = this.overlays.get(id);
       if (overlay) {
@@ -1046,8 +1319,6 @@ export class Scene2D {
     const overlay = this.overlays.get(id);
 
     if (overlay) {
-      const overlayType = overlay.getOverlayType();
-
       this.interactionManager.removeHandler(overlay);
       this.selectionManager.removeSelectable(id);
 
@@ -1059,19 +1330,12 @@ export class Scene2D {
 
       this.overlays.delete(id);
       this.overlayOrder = this.overlayOrder.filter(
-        (overlayId) => overlayId !== id
+        (overlayId) => overlayId !== id,
       );
       this.renderingState.clear(id);
-
-      // make sure we don't leave a gap in our stack of Classifications
-      if (overlayType === "ClassificationOverlay") {
-        [...this.overlays.values()]
-          .filter((sibling) => sibling.getOverlayType() === overlayType)
-          .forEach((sibling) => sibling.markDirty());
-      }
     }
 
-    this.eventBus.dispatch("lighter:overlay-removed", { id });
+    this.eventBus.dispatch("lighter:overlay-removed", { id, lifecycle });
   }
 
   /**
@@ -1117,7 +1381,7 @@ export class Scene2D {
    */
   async transformOverlay(
     id: string,
-    options: TransformOptions
+    options: TransformOptions,
   ): Promise<boolean> {
     const overlay = this.overlays.get(id);
     if (!overlay) {
@@ -1126,13 +1390,13 @@ export class Scene2D {
     }
 
     // Check if overlay supports transformation
-    if (!TypeGuards.isTransformable(overlay)) {
+    if (!TypeGuards.isSpatial(overlay)) {
       console.warn(`Overlay with id ${id} does not support transformation`);
       return false;
     }
 
     // Get current bounds for undo/redo
-    const oldBounds = overlay.getBounds();
+    const oldBounds = overlay.bounds;
 
     // Calculate new bounds
     let newBounds = { ...oldBounds };
@@ -1154,7 +1418,7 @@ export class Scene2D {
       overlay,
       id,
       oldBounds,
-      newBounds
+      newBounds,
     );
 
     await this.executeCommand(command);
@@ -1176,7 +1440,7 @@ export class Scene2D {
    */
   getVisibleOverlays(): BaseOverlay[] {
     return Array.from(this.overlays.values()).filter((overlay) =>
-      this.shouldShowOverlay(overlay)
+      this.shouldShowOverlay(overlay),
     );
   }
 
@@ -1197,7 +1461,7 @@ export class Scene2D {
   getVisibleSelectableOverlays(): BaseOverlay[] {
     return Array.from(this.overlays.values()).filter(
       (overlay) =>
-        this.shouldShowOverlay(overlay) && TypeGuards.isSelectable(overlay)
+        this.shouldShowOverlay(overlay) && TypeGuards.isSelectable(overlay),
     );
   }
 
@@ -1223,6 +1487,15 @@ export class Scene2D {
       isUndoable,
       command,
     });
+  }
+
+  /**
+   * Hand undo/redo authority to an external owner (the annotation engine). While
+   * set, Lighter records no edit commands of its own — the owner captures every
+   * gesture, so a self-push would double-count it on the shared command stack.
+   */
+  setExternalUndoAuthority(enabled: boolean): void {
+    this.externalUndoAuthority = enabled;
   }
 
   /**
@@ -1437,62 +1710,6 @@ export class Scene2D {
   }
 
   /**
-   * Updates coordinates for all spatial overlays.
-   */
-  private updateAllSpatialOverlays(): void {
-    for (const overlay of this.overlays.values()) {
-      if (TypeGuards.isSpatial(overlay)) {
-        this.updateSpatialOverlayCoordinates(overlay);
-      }
-    }
-  }
-
-  /**
-   * Marks Classifications as dirty to be redrawn
-   */
-  private updateClassifications(): void {
-    this.overlays.forEach((overlay) => {
-      if (overlay instanceof ClassificationOverlay) {
-        overlay.markDirty();
-      }
-    });
-  }
-
-  /**
-   * Updates coordinates for a single spatial overlay.
-   */
-  private updateSpatialOverlayCoordinates(
-    overlay: BaseOverlay & Spatial
-  ): void {
-    const relativeBounds = overlay.getRelativeBounds();
-    if (BaseOverlay.validBounds(relativeBounds)) {
-      const absoluteBounds =
-        this.coordinateSystem.relativeToAbsolute(relativeBounds);
-      overlay.setAbsoluteBounds(absoluteBounds);
-    }
-  }
-
-  /**
-   * Updates relative bounds for a spatial overlay based on its current absolute bounds.
-   * This is used when an overlay's position is changed and we need to update its relative coordinates.
-   * @param overlay - The spatial overlay to update.
-   */
-  private updateSpatialOverlayRelativeBounds(
-    overlay: BaseOverlay & Spatial
-  ): void {
-    const absoluteBounds = overlay.getAbsoluteBounds();
-
-    if (BaseOverlay.validBounds(absoluteBounds)) {
-      const relativeBounds =
-        this.coordinateSystem.absoluteToRelative(absoluteBounds);
-
-      // Update the overlays relative bounds
-      overlay.setRelativeBounds(relativeBounds);
-      overlay.markCoordinateUpdateComplete();
-    }
-  }
-
-  /**
    * Gets the container dimensions.
    * @returns The container dimensions, or undefined if not available.
    */
@@ -1503,51 +1720,23 @@ export class Scene2D {
   /**
    * Renders a single frame.
    */
-  private async renderFrame(): Promise<void> {
+  private renderFrame(): void {
     // Execute before-render callbacks
-    await this.executeRenderCallbacks("before");
-
-    // Before rendering, update relative bounds for overlays that need it
-    for (const overlay of this.overlays.values()) {
-      if (TypeGuards.isSpatial(overlay) && overlay.needsCoordinateUpdate()) {
-        this.updateSpatialOverlayRelativeBounds(overlay);
-        const absoluteBounds = overlay.getAbsoluteBounds();
-        const relativeBounds = overlay.getRelativeBounds();
-
-        if (
-          BaseOverlay.validBounds(absoluteBounds) &&
-          BaseOverlay.validBounds(relativeBounds)
-        ) {
-          this.eventBus.dispatch("lighter:overlay-bounds-changed", {
-            id: overlay.id,
-            absoluteBounds,
-            relativeBounds,
-          });
-        }
-      }
-    }
-
-    const overlayIndexes: Record<string, number> = {};
+    this.executeRenderCallbacks("before");
 
     for (const overlayId of this.overlayOrder) {
-      const overlayType = this.overlays.get(overlayId)!.getOverlayType();
-      const currentIndex = overlayIndexes[overlayType] ?? -1;
-      const overlayIndex = currentIndex + 1;
-      overlayIndexes[overlayType] = overlayIndex;
-
-      this.renderOverlay(overlayId, overlayIndex);
+      this.renderOverlay(overlayId);
     }
 
     // Execute after-render callbacks
-    await this.executeRenderCallbacks("after");
+    this.executeRenderCallbacks("after");
   }
 
   /**
    * Renders a specific overlay if it's pending.
    * @param overlayId - The ID of the overlay to render.
-   * @param overlayIndex - The index of this particular overlay with respect to its type (e.g. ClassificationOverlay, BoundingBoxOverlay, etc.)
    */
-  private renderOverlay(overlayId: string, overlayIndex: number): void {
+  private renderOverlay(overlayId: string): void {
     const overlay = this.overlays.get(overlayId);
 
     if (!overlay) {
@@ -1557,7 +1746,7 @@ export class Scene2D {
     const status = this.renderingState.getStatus(overlayId);
 
     if (overlay && this.shouldRenderOverlay(overlay, status)) {
-      this.executeOverlayRender(overlayId, overlay, overlayIndex);
+      this.executeOverlayRender(overlayId, overlay);
     }
 
     if (this.shouldShowOverlay(overlay)) {
@@ -1577,7 +1766,7 @@ export class Scene2D {
    */
   private shouldRenderOverlay(
     overlay: BaseOverlay | undefined,
-    status: string
+    status: string,
   ): boolean {
     return (
       overlay !== undefined &&
@@ -1596,8 +1785,18 @@ export class Scene2D {
     if (this.sceneOptions?.showOverlays === false) return false;
 
     const activePaths = this.sceneOptions?.activePaths;
-    if (activePaths && overlay.field) {
-      return activePaths.includes(overlay.field);
+    if (activePaths && overlay.field && !activePaths.includes(overlay.field)) {
+      return false;
+    }
+
+    // Per-label filter (sidebar confidence / value / tag filters, and hidden
+    // labels — both fold into the one predicate the looker checked in
+    // `Overlay.isShown`). Skipped for a field-less overlay: the canonical
+    // media is already returned above, and any other field-less overlay is
+    // not a label the filter has an opinion about.
+    const filter = this.sceneOptions?.filter;
+    if (filter && overlay.field && !filter(overlay.field, overlay.label)) {
+      return false;
     }
 
     return true;
@@ -1607,13 +1806,8 @@ export class Scene2D {
    * Executes the rendering of an overlay with proper error handling.
    * @param overlayId - The ID of the overlay being rendered.
    * @param overlay - The overlay to render.
-   * @param overlayIndex - The index of this particular overlay with respect to its type (e.g. ClassificationOverlay, BoundingBoxOverlay, etc.)
    */
-  private executeOverlayRender(
-    overlayId: string,
-    overlay: BaseOverlay,
-    overlayIndex: number
-  ): void {
+  private executeOverlayRender(overlayId: string, overlay: BaseOverlay): void {
     this.renderingState.setStatus(overlayId, OVERLAY_STATUS_PAINTING);
 
     try {
@@ -1625,24 +1819,14 @@ export class Scene2D {
           height: 0,
         };
 
-      const ret = overlay.render(
-        this.config.renderer,
-        this.createOverlayStyle(overlay),
-        {
-          canonicalMediaBounds,
-          overlayIndex,
-        }
-      );
+      overlay.render(this.config.renderer, this.createOverlayStyle(overlay), {
+        canonicalMediaBounds,
+      });
 
-      if (ret instanceof Promise) {
-        ret.then(() => {
-          this.renderingState.setStatus(overlayId, OVERLAY_STATUS_PAINTED);
-          overlay.markClean();
-        });
-      } else {
-        this.renderingState.setStatus(overlayId, OVERLAY_STATUS_PAINTED);
-        overlay.markClean();
-      }
+      // `render` is synchronous by contract — a rebuild pass opens and closes
+      // within one call — so the overlay is painted by the time this returns.
+      this.renderingState.setStatus(overlayId, OVERLAY_STATUS_PAINTED);
+      overlay.markClean();
     } catch (error) {
       this.handleRenderError(overlayId, error);
     }
@@ -1672,7 +1856,7 @@ export class Scene2D {
    * @param handler - The interaction handler to use for interactive mode.
    */
   public enterInteractiveMode(
-    handler: InteractionHandler | InteractiveDetectionHandler
+    handler: InteractionHandler | InteractiveDetectionHandler,
   ): void {
     if (this.interactiveMode) {
       return;
@@ -1712,6 +1896,50 @@ export class Scene2D {
     this.eventBus.dispatch("lighter:scene-interactive-mode-changed", {
       interactiveMode: false,
     });
+  }
+
+  /**
+   * Registers a handler invoked when a pointer-down event lands on the
+   * empty canvas (no overlay, or only the canonical media). Returning `true`
+   * from the handler claims the click — the scene skips its default
+   * empty-canvas behavior. Pass `null` to clear.
+   *
+   * Used by consumers to seed a new overlay at the click position without
+   * coupling lighter to the consumer's identity.
+   */
+  public setEmptyCanvasClickHandler(
+    handler: EmptyCanvasClickHandler | null,
+  ): void {
+    this.interactionManager.setEmptyCanvasClickHandler(handler);
+  }
+
+  /**
+   * Converts an absolute (world-space) point to relative coordinates using
+   * the scene's coordinate system. Useful for consumers that receive world
+   * points (e.g. via {@link setEmptyCanvasClickHandler}) and need to seed a
+   * new overlay with relative-coordinate label data.
+   */
+  public absolutePointToRelative(point: { x: number; y: number }): {
+    x: number;
+    y: number;
+  } {
+    const t = this.coordinateSystem.getTransform();
+    return {
+      x: (point.x - t.offsetX) / t.scaleX,
+      y: (point.y - t.offsetY) / t.scaleY,
+    };
+  }
+
+  /**
+   * Converts a screen-space (canvas-local) pixel point to world-space using
+   * the scene's renderer transform. Inverse of the renderer's internal
+   * world→screen pipeline.
+   */
+  public screenToWorld(point: { x: number; y: number }): {
+    x: number;
+    y: number;
+  } {
+    return this.config.renderer.screenToWorld(point);
   }
 
   /**

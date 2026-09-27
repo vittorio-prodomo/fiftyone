@@ -5,6 +5,10 @@ CVAT Integration
 
 .. default-role:: code
 
+.. customavailablein::
+    :oss_version: 0.13.0
+    :enterprise_version: 1.0
+
 `CVAT <https://github.com/opencv/cvat>`_ is one of the most popular
 open-source image and video annotation tools available, and we've made it easy
 to upload your data directly from FiftyOne to CVAT to add or edit labels.
@@ -226,15 +230,14 @@ You can also store your credentials in your
 :ref:`annotation config <annotation-config>` located at
 `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "backends": {
             "cvat": {
-                ...
-                "username": ...,
-                "password": ...,
-                "email": ...  # if applicable
+                "username": "<username>",
+                "password": "<password>",
+                "email": "<email>"
             }
         }
     }
@@ -296,13 +299,12 @@ you can configure the URL of your server in any of the following ways:
     :ref:`annotation config <annotation-config>` at
     `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "backends": {
             "cvat": {
-                "url": "http://localhost:8080",
-                ...
+                "url": "http://localhost:8080"
             }
         }
     }
@@ -322,15 +324,13 @@ requests, you can provide them in either of the following ways:
     :ref:`annotation config <annotation-config>` at
     `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "backends": {
             "cvat": {
-                ...
                 "headers": {
-                    "<name>": "<value>",
-                    ...
+                    "<name>": "<value>"
                 }
             }
         }
@@ -351,6 +351,10 @@ requests, you can provide them in either of the following ways:
 
 Requesting annotations
 ______________________
+
+.. customavailablein::
+    :oss_version: 0.13.3
+    :enterprise_version: 1.0
 
 Use the
 :meth:`annotate() <fiftyone.core.collections.SampleCollection.annotate>` method
@@ -456,12 +460,13 @@ details:
     If a `label_schema` is also provided, this parameter determines which
     attributes are included for all fields that do not explicitly define their
     per-field attributes (in addition to any per-class attributes)
--   **mask_targets** (*None*): a dict mapping pixel values to semantic label
-    strings. Only applicable when annotating semantic segmentations. All new
-    label fields must have mask targets provided via one of the supported
-    methods. For existing label fields, if mask targets are not provided by
-    this argument nor `label_schema`, any applicable mask targets stored on
-    your dataset will be used, if available
+-   **mask_targets** (*None*): a dict mapping pixel values (2D masks) or RGB
+    hex strings (3D masks) to semantic label strings. Only applicable when
+    annotating semantic segmentations. All new label fields must have mask
+    targets provided via one of the supported methods. For existing label
+    fields, if mask targets are not provided by this argument nor
+    `label_schema`, any applicable mask targets stored on your dataset will be
+    used, if available
 -   **allow_additions** (*True*): whether to allow new labels to be added. Only
     applicable when editing existing label fields
 -   **allow_deletions** (*True*): whether to allow labels to be deleted. Only
@@ -694,6 +699,10 @@ FiftyOne can infer the appropriate values to use:
 
 Label attributes
 ----------------
+
+.. customavailablein::
+    :oss_version: 0.14.0
+    :enterprise_version: 1.0
 
 The `attributes` parameter allows you to configure whether
 :ref:`custom attributes <using-labels>` beyond the default `label` attribute
@@ -1517,6 +1526,10 @@ involves multiple fields:
 Unexpected annotations
 ----------------------
 
+.. customavailablein::
+    :oss_version: 0.14.3
+    :enterprise_version: 1.0
+
 The :meth:`annotate() <fiftyone.core.collections.SampleCollection.annotate>`
 method allows you to define the annotation schema that should be followed in
 CVAT. However, CVAT does not explicitly allow for restricting the label types
@@ -1771,6 +1784,10 @@ will be assigned using a round-robin strategy.
 
 Large annotation runs
 ---------------------
+
+.. customavailablein::
+    :oss_version: 0.14.3
+    :enterprise_version: 1.0
 
 The CVAT API imposes a limit on the size of all requests. By default, all
 images are uploaded to a single CVAT task, which can result in errors when
@@ -2400,6 +2417,10 @@ every 10th frame as a keyframe to provide a better editing experience in CVAT:
 
 Annotating 3D data
 __________________
+
+.. customavailablein::
+    :oss_version: 1.4.0
+    :enterprise_version: 2.7.0
 
 CVAT supports annotating 3D detections on point cloud data.
 

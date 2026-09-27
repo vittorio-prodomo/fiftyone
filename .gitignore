@@ -6,6 +6,8 @@ node_modules
 __pycache__
 *.py[cod]
 
+*.local.md
+
 *.egg-info
 .project
 .pydevproject
@@ -24,6 +26,8 @@ dist/
 /docs/build/
 /docs/source/api/
 /docs/source/plugins/plugins_ecosystem/
+/docs/source/labs/labs_ecosystem/
+/docs/source/agents/skills_ecosystem/
 
 /bin
 /lib
@@ -33,8 +37,13 @@ pyvenv.cfg
 
 .env
 
+.playwright-mcp
+
 # Claude Code personal config (per-machine, never team-shared)
 .claude/settings.local.json
 
 # uv lockfile — match upstream (they do not commit it); avoids fork divergence
 uv.lock
+
+# Serena MCP project config (per-machine tool config)
+.serena/

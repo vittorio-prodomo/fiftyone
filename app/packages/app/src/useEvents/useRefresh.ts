@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import { subscribe } from "@fiftyone/relay";
 import * as fos from "@fiftyone/state";
 import { useCallback } from "react";
@@ -15,7 +19,7 @@ const useRefresh: EventHandlerHook = ({ router, session }) => {
       const state = processState(session.current, payload.state);
       const path = resolveURL({
         currentPathname: router.history.location.pathname,
-        currentSearch: router.history.location.search,
+        currentSearch: router.location.search,
         nextDataset: (payload.state.dataset as string) || null,
         nextView: payload.state.saved_view_slug as string,
         extra: {
@@ -30,7 +34,7 @@ const useRefresh: EventHandlerHook = ({ router, session }) => {
 
       router.history.replace(path, state);
     },
-    [router, session]
+    [router, session],
   );
 };
 

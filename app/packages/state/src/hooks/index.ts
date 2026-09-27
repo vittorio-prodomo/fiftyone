@@ -1,6 +1,25 @@
 export * from "./hooks-utils";
+export * from "./media-field-lookers";
 export { default as useSearchSchemaFields } from "./schema/useSearchSchemaFields";
 export { default as useSetSelectedFieldsStage } from "./schema/useSetSelectedFieldsStage";
+export {
+  default as usePromptableSimilarityKeys,
+  type PromptableSimilarityIndex,
+} from "./similaritySearch/usePromptableSimilarityKeys";
+export {
+  registerTextSearchExtension,
+  useTextSearchExtensions,
+  type SearchSources,
+  type TextSearchExtension,
+  type TextSearchIndex,
+  type TextSearchRequest,
+  type TextSearchResult,
+} from "./similaritySearch/textSearchExtensions";
+export {
+  useSetViewChangePending,
+  useViewChangePending,
+} from "./useViewChangePending";
+export { default as useSimilarityKeys } from "./similaritySearch/useSimilarityKeys";
 export { default as useSimilarityType } from "./similaritySearch/useSimilarityType";
 export * from "./useActivityToast";
 export {
@@ -16,8 +35,10 @@ export * from "./useExpandSample";
 export { default as useExpandSample } from "./useExpandSample";
 export { default as useHelpPanel } from "./useHelpPanel";
 export { default as useHover } from "./useHover";
+export { useIsMediaType, useIsVideo } from "./useIsMediaType";
 export { default as useHoveredSample } from "./useHoveredSample";
 export { default as useJSONPanel } from "./useJSONPanel";
+export { default as useLabelAttributeToggle } from "./useLabelAttributeToggle";
 export { default as useKeyDown } from "./useKeyDown";
 export * from "./useLookerStore";
 export { default as useLookerStore } from "./useLookerStore";
@@ -28,8 +49,16 @@ export { default as usePanel } from "./usePanel";
 export { default as useQueryPerformance } from "./useQueryPerformance";
 export { default as useRefresh } from "./useRefresh";
 export * from "./useRefreshSample";
+export * from "./useRenderConfig3d";
 export { default as useReset } from "./useReset";
-export { default as useResetExtendedSelection } from "./useResetExtendedSelection";
+export {
+  default as useResetExtendedSelection,
+  resetExtendedSelectionTransaction,
+  usePublishExtendedSelection,
+} from "./useResetExtendedSelection";
+export * from "./extendedSelectionReset";
+export * from "./useRetryController";
+export { default as useSampleFields } from "./useSampleFields";
 export { default as useSavedViews } from "./useSavedViews";
 export { default as useSchemaSettings } from "./useSchemaSettings";
 export { default as useScreenshot } from "./useScreenshot";
@@ -45,6 +74,7 @@ export { default as useSetSessionColorScheme } from "./useSetSessionColorScheme"
 export { default as useSetSpaces } from "./useSetSpaces";
 export { default as useSetView } from "./useSetView";
 export { default as useTimeout } from "./useTimeout";
+export { default as useTimeZone } from "./useTimeZone";
 export { default as useToClips } from "./useToClips";
 export { default as useToEvaluationPatches } from "./useToEvaluationPatches";
 export { default as useTooltip } from "./useTooltip";

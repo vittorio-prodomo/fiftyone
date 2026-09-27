@@ -7,6 +7,7 @@ Utilities for working with the
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 import logging
 import os
 import shutil
@@ -16,7 +17,6 @@ import eta.core.web as etaw
 
 import fiftyone.types as fot
 import fiftyone.utils.data as foud
-
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def download_caltech101_dataset(dataset_dir, scratch_dir=None):
 
     try:
         etau.delete_file(os.path.join(dataset_dir, "BACKGROUND_Google", "tmp"))
-    except:
+    except Exception:
         pass
 
     # We must always delete `scratch_dir` because it would be confused as a
@@ -132,12 +132,12 @@ def download_caltech256_dataset(dataset_dir, scratch_dir=None):
 
     try:
         etau.delete_dir(os.path.join(dataset_dir, "056.dog", "greg"))
-    except:
+    except Exception:
         pass
 
     try:
         etau.delete_file(os.path.join(dataset_dir, "198.spider", "RENAME2"))
-    except:
+    except Exception:
         pass
 
     # We must always delete `scratch_dir` because it would be confused as a

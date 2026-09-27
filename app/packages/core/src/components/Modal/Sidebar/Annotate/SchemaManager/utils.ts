@@ -6,12 +6,14 @@ import { is3d } from "@fiftyone/utilities";
 import type { ListItemProps as BaseListItemProps } from "@voxel51/voodo";
 import type { ReactNode } from "react";
 import {
+  type ClassesComponent,
   CLASSES_COMPONENT_THRESHOLD,
   componentNeedsRange,
   componentNeedsValues,
   getDefaultComponent,
   LABEL_TYPE_OPTIONS,
   LABEL_TYPE_OPTIONS_3D,
+  LABEL_TYPE_OPTIONS_VIDEO,
   LIST_TYPES,
   NUMERIC_TYPES,
   SYSTEM_READ_ONLY_FIELD_NAME,
@@ -41,7 +43,33 @@ export interface RichListItemOptions {
   additionalContent?: ReactNode;
   canSelect?: boolean;
   canDrag?: boolean;
+  className?: string;
 }
+
+// Leaf condition: a single field comparison (equals / in).
+export interface AttributeConditionLeaf {
+  operator: "equals" | "in";
+  field: string;
+  value: unknown;
+}
+
+// Group condition: satisfied when ALL child conditions are met.
+export interface AttributeConditionAnd {
+  operator: "and";
+  conditions: AttributeCondition[];
+}
+
+// Group condition: satisfied when ANY child condition is met.
+export interface AttributeConditionOr {
+  operator: "or";
+  conditions: AttributeCondition[];
+}
+
+// Discriminated union over all condition node shapes.
+export type AttributeCondition =
+  | AttributeConditionLeaf
+  | AttributeConditionAnd
+  | AttributeConditionOr;
 
 // Attribute configuration (matches API)
 // Note: When stored in schema, attributes include 'name' field
@@ -51,8 +79,14 @@ export interface AttributeConfig {
   component?: string;
   values?: (string | number)[];
   range?: [number, number];
-  default?: string | number | (string | number)[]; // Array for list types
+  default?: string | number | boolean | (string | number)[]; // Array for list types
   read_only?: boolean;
+  // Attribute value may vary frame-to-frame within a track; drives sub-track
+  // rows and excludes the attribute from whole-track propagation.
+  dynamic?: boolean;
+  when?: AttributeCondition;
+  _source?: string;
+  taxonomy?: string;
 }
 
 // Class configuration
@@ -74,6 +108,13 @@ export interface SchemaConfigType {
   read_only?: boolean;
 }
 
+export const VALUES_MODE = {
+  simple: "simple",
+  taxonomy: "taxonomy",
+} as const;
+
+export type ValuesMode = (typeof VALUES_MODE)[keyof typeof VALUES_MODE];
+
 // Form state for attribute editing (uses strings for form inputs)
 export interface AttributeFormData {
   name: string;
@@ -84,6 +125,11 @@ export interface AttributeFormData {
   default: string;
   listDefault: (string | number)[]; // For list types
   read_only: boolean;
+  dynamic: boolean;
+  when?: AttributeCondition;
+  _source?: string;
+  valuesMode: ValuesMode;
+  taxonomy?: string;
 }
 
 // =============================================================================
@@ -117,7 +163,7 @@ export const hasAttributes = (value: unknown): value is LabelSchema =>
 export const getAttributeNames = (value: unknown): Set<string> => {
   if (hasAttributes(value) && Array.isArray(value.attributes)) {
     return new Set(
-      value.attributes.filter(isNamedAttribute).map((attr) => attr.name)
+      value.attributes.filter(isNamedAttribute).map((attr) => attr.name),
     );
   }
   return new Set();
@@ -138,6 +184,7 @@ export const createRichListItem = ({
   additionalContent,
   canSelect = false,
   canDrag = false,
+  className,
 }: RichListItemOptions): RichListItem => ({
   id,
   data: {
@@ -147,6 +194,7 @@ export const createRichListItem = ({
     secondaryContent,
     actions,
     additionalContent,
+    className,
   },
 });
 
@@ -189,12 +237,12 @@ export const getAttributeTypeLabel = (type: string): string => {
 export const getClassNameError = (
   name: string,
   existingClasses: string[],
-  currentClass?: string
+  currentClass?: string,
 ): string | null => {
   const trimmed = name.trim();
   if (!trimmed) return "Class name cannot be empty";
   const isDuplicate = existingClasses.some(
-    (c) => c !== currentClass && c === trimmed
+    (c) => c !== currentClass && c === trimmed,
   );
   if (isDuplicate) return "Class name already exists";
   return null;
@@ -206,12 +254,12 @@ export const getClassNameError = (
 export const getAttributeNameError = (
   name: string,
   existingAttributes: string[],
-  currentAttribute?: string
+  currentAttribute?: string,
 ): string | null => {
   const trimmed = name.trim();
   if (!trimmed) return "Attribute name cannot be empty";
   const isDuplicate = existingAttributes.some(
-    (a) => a !== currentAttribute && a === trimmed
+    (a) => a !== currentAttribute && a === trimmed,
   );
   if (isDuplicate) return "Attribute name already exists";
   return null;
@@ -237,7 +285,7 @@ export const formatSchemaCount = (count: number): string => {
 export const buildFieldSecondaryContent = (
   fieldType: string,
   attrCount: number,
-  isSystemReadOnly: boolean
+  isSystemReadOnly: boolean,
 ): string => {
   const typeText = isSystemReadOnly ? SYSTEM_READ_ONLY_FIELD_NAME : fieldType;
   if (!isSystemReadOnly && attrCount > 0) {
@@ -262,6 +310,8 @@ export const createDefaultFormData = (): AttributeFormData => ({
   default: "",
   listDefault: [],
   read_only: false,
+  dynamic: false,
+  valuesMode: VALUES_MODE.simple,
 });
 
 /**
@@ -276,7 +326,7 @@ export const toFormData = (config: AttributeConfig): AttributeFormData => {
   if (config.default !== undefined) {
     if (Array.isArray(config.default)) {
       listDefault = config.default;
-    } else if (isListType) {
+    } else if (isListType && typeof config.default !== "boolean") {
       // Single value for list type - wrap in array
       listDefault = [config.default];
     } else {
@@ -296,6 +346,11 @@ export const toFormData = (config: AttributeConfig): AttributeFormData => {
     default: defaultStr,
     listDefault,
     read_only: config.read_only || false,
+    dynamic: config.dynamic || false,
+    when: config.when,
+    _source: config._source,
+    valuesMode: config.taxonomy ? VALUES_MODE.taxonomy : VALUES_MODE.simple,
+    taxonomy: config.taxonomy,
   };
 };
 
@@ -326,18 +381,34 @@ export const toAttributeConfig = (data: AttributeFormData): AttributeConfig => {
   }
 
   // Convert default to appropriate type
-  let defaultValue: string | number | (string | number)[] | undefined;
+  let defaultValue: string | number | boolean | (string | number)[] | undefined;
   if (isListType) {
     // For list types, use listDefault array
     if (data.listDefault && data.listDefault.length > 0) {
       defaultValue = data.listDefault;
     }
+  } else if (data.type === "bool") {
+    // For bool, map the tri-state form value to a real boolean (or undefined)
+    if (data.default === "true") defaultValue = true;
+    else if (data.default === "false") defaultValue = false;
   } else if (data.default) {
     // For non-list types, convert to number if numeric
     defaultValue = isNumeric ? parseFloat(data.default) : data.default;
     if (typeof defaultValue === "number" && isNaN(defaultValue)) {
       defaultValue = undefined;
     }
+  }
+
+  if (data.valuesMode === VALUES_MODE.taxonomy) {
+    return {
+      name: data.name.trim(),
+      type: data.type,
+      component: data.component || undefined,
+      range,
+      read_only: data.read_only || undefined,
+      dynamic: data.dynamic || undefined,
+      taxonomy: data.taxonomy,
+    };
   }
 
   return {
@@ -348,6 +419,7 @@ export const toAttributeConfig = (data: AttributeFormData): AttributeConfig => {
     range,
     default: defaultValue,
     read_only: data.read_only || undefined,
+    dynamic: data.dynamic || undefined,
   };
 };
 
@@ -358,6 +430,7 @@ export interface AttributeFormErrors {
   values: string | null;
   range: string | null;
   default: string | null;
+  taxonomy: string | null;
 }
 
 // =============================================================================
@@ -370,7 +443,7 @@ export interface AttributeFormErrors {
  */
 export const validateValues = (
   values: string[],
-  isNumeric: boolean
+  isNumeric: boolean,
 ): string | null => {
   if (values.length === 0) {
     return "At least one value is required";
@@ -392,7 +465,7 @@ export const validateSingleValue = (
   value: string,
   existingValues: string[],
   isNumeric: boolean,
-  isInteger: boolean
+  isInteger: boolean,
 ): string | null => {
   if (!value.trim()) return null;
   if (isNumeric) {
@@ -408,7 +481,7 @@ export const validateSingleValue = (
  * Validate a range (min/max) for slider components.
  */
 export const validateRange = (
-  range: { min: string; max: string } | null
+  range: { min: string; max: string } | null,
 ): string | null => {
   if (!range || range.min === "" || range.max === "") {
     return "Min and max are required";
@@ -437,7 +510,7 @@ export const parseNumericValues = (vals: unknown[]): (string | number)[] =>
  * Remove duplicate values by string key, preserving the last occurrence's type.
  */
 export const deduplicateValues = (
-  vals: (string | number)[]
+  vals: (string | number)[],
 ): (string | number)[] => [
   ...new Map(vals.map((v) => [String(v), v])).values(),
 ];
@@ -453,7 +526,7 @@ const validateScalarDefault = (
   values: string[],
   valuesError: string | null,
   needsRange: boolean,
-  needsValues: boolean
+  needsValues: boolean,
 ): string | null => {
   const defaultNum = parseFloat(defaultValue);
 
@@ -487,7 +560,7 @@ const validateListDefault = (
   isIntegerList: boolean,
   values: string[],
   valuesError: string | null,
-  needsValues: boolean
+  needsValues: boolean,
 ): string | null => {
   if (!listDefault || listDefault.length === 0) return null;
 
@@ -526,16 +599,25 @@ const validateListDefault = (
  * Used for both UI display and canSave logic.
  */
 export const getAttributeFormErrors = (
-  data: AttributeFormData
+  data: AttributeFormData,
 ): AttributeFormErrors => {
   const isNumeric = NUMERIC_TYPES.includes(data.type);
   const needsValues = componentNeedsValues(data.component);
   const needsRange = isNumeric && componentNeedsRange(data.component);
   const isListType = LIST_TYPES.includes(data.type);
 
-  const valuesError = needsValues
-    ? validateValues(data.values, isNumeric)
-    : null;
+  const isTaxonomyMode = data.valuesMode === VALUES_MODE.taxonomy;
+
+  // In taxonomy mode, skip values validation and instead require a taxonomy selection.
+  const valuesError =
+    needsValues && !isTaxonomyMode
+      ? validateValues(data.values, isNumeric)
+      : null;
+
+  const taxonomyError =
+    needsValues && isTaxonomyMode && !data.taxonomy
+      ? "Select a taxonomy"
+      : null;
 
   const rangeError = needsRange ? validateRange(data.range) : null;
 
@@ -546,20 +628,20 @@ export const getAttributeFormErrors = (
       isNumeric,
       data.range,
       rangeError,
-      data.values,
+      isTaxonomyMode ? [] : data.values,
       valuesError,
       needsRange,
-      needsValues
+      needsValues && !isTaxonomyMode,
     );
   }
-  if (!defaultError && isListType) {
+  if (!defaultError && isListType && !isTaxonomyMode) {
     defaultError = validateListDefault(
       data.listDefault,
       isNumeric,
       data.type === "list<int>",
       data.values,
       valuesError,
-      needsValues
+      needsValues,
     );
   }
 
@@ -567,6 +649,7 @@ export const getAttributeFormErrors = (
     values: valuesError,
     range: rangeError,
     default: defaultError,
+    taxonomy: taxonomyError,
   };
 };
 
@@ -574,30 +657,32 @@ export const getAttributeFormErrors = (
  * Check if form has any validation errors
  */
 export const hasAttributeFormError = (errors: AttributeFormErrors): boolean =>
-  !!(errors.values || errors.range || errors.default);
+  !!(errors.values || errors.range || errors.default || errors.taxonomy);
 
 // =============================================================================
 // Component Reconciliation
 // =============================================================================
 
+/** Class-count default for a label field's classes input type. */
+export const defaultClassesComponent = (classes: string[]): ClassesComponent =>
+  classes.length > CLASSES_COMPONENT_THRESHOLD ? "dropdown" : "radio";
+
 /**
  * Auto-adjust the component type to match the current classes.
- * - Classes present + component is "text" → switch to "radio" or "dropdown"
+ * - Classes present + component is "text" (or unset) → "radio" or "dropdown"
+ *   by class count
+ * - Classes present + explicit "radio"/"dropdown" → preserved as chosen
  * - Classes removed + component is "radio"/"dropdown" → switch to "text"
  */
 export const reconcileComponent = (
-  config: SchemaConfigType
+  config: SchemaConfigType,
 ): SchemaConfigType => {
   const { classes, component } = config;
   const hasClasses = classes && classes.length > 0;
 
   if (hasClasses) {
-    if (component === "text") {
-      return {
-        ...config,
-        component:
-          classes.length > CLASSES_COMPONENT_THRESHOLD ? "dropdown" : "radio",
-      };
+    if (!component || component === "text") {
+      return { ...config, component: defaultClassesComponent(classes) };
     }
   } else {
     // Strip empty classes key and reset component to text
@@ -616,11 +701,20 @@ export const reconcileComponent = (
 // =============================================================================
 
 /**
- * Get label type options based on media type
+ * Get label type options based on media type and field scope.
+ *
+ * Frame-level fields on video are per-image, so they support the full spatial
+ * label set; sample-level video fields are limited to clip-level label types.
  */
-export const getLabelTypeOptions = (mediaType: string | null | undefined) => {
+export const getLabelTypeOptions = (
+  mediaType: string | null | undefined,
+  isFrameField = false,
+) => {
   if (mediaType && is3d(mediaType)) {
     return LABEL_TYPE_OPTIONS_3D;
+  }
+  if (mediaType === "video") {
+    return isFrameField ? LABEL_TYPE_OPTIONS : LABEL_TYPE_OPTIONS_VIDEO;
   }
   return LABEL_TYPE_OPTIONS;
 };
@@ -634,15 +728,28 @@ export const getLabelTypeOptions = (mediaType: string | null | undefined) => {
  */
 export const validateFieldName = (
   fieldName: string,
-  existingFields: Record<string, unknown> | null
+  existingFields: Record<string, unknown> | null,
+  mediaType?: string | null,
 ): string | null => {
   const trimmed = fieldName.trim();
   if (!trimmed) return null;
   if (existingFields && trimmed in existingFields) {
     return "Field name already exists";
   }
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(trimmed)) {
-    return "Invalid field name (use letters, numbers, underscores)";
+
+  // Frame fields only exist on video, where a single "frames." prefix targets
+  // the frame schema (e.g. "frames.detections"). The "." stays disallowed
+  // everywhere else, and deeper paths are rejected.
+  const isVideo = mediaType === "video";
+  const pattern = isVideo
+    ? /^(frames\.)?[a-zA-Z_][a-zA-Z0-9_]*$/
+    : /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+  if (!pattern.test(trimmed)) {
+    return isVideo
+      ? "Invalid field name (use letters, numbers, underscores; prefix with frames. for a frame field)"
+      : "Invalid field name (use letters, numbers, underscores)";
   }
+
   return null;
 };

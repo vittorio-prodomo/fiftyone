@@ -2,7 +2,7 @@
  * Main GUI View component for editing field schema.
  */
 
-import { LoadingSpinner, scrollable } from "@fiftyone/components";
+import { LoadingSpinner } from "@fiftyone/components";
 import {
   Button,
   Size,
@@ -12,15 +12,20 @@ import {
   Variant,
 } from "@voxel51/voodo";
 import { useCallback, useMemo } from "react";
-import { PRIMITIVE_FIELD_TYPES } from "../../constants";
-import { useFieldType } from "../../hooks";
 import {
-  EditSectionHeader,
-  EmptyStateBox,
-  ListContainer,
-  Section,
-} from "../../styled";
-import type { AttributeConfig, SchemaConfigType } from "../../utils";
+  PRIMITIVE_FIELD_TYPES,
+  isClassesComponent,
+  type ClassesComponent,
+} from "../../constants";
+import { useFieldType } from "../../hooks";
+import { EditSectionHeader, EmptyStateBox, Section } from "../../styled";
+import {
+  defaultClassesComponent,
+  reconcileComponent,
+  type AttributeConfig,
+  type SchemaConfigType,
+} from "../../utils";
+import { useAppliedOntology } from "../useLabelSchema";
 import AttributesSection from "./AttributesSection";
 import ClassesSection from "./ClassesSection";
 import PrimitiveFieldContent from "./PrimitiveFieldContent";
@@ -49,12 +54,21 @@ const GUIContent = ({
 }: GUIContentProps) => {
   const fType = useFieldType(field);
   const isPrimitive = fType ? PRIMITIVE_FIELD_TYPES.has(fType) : false;
+  const { appliedTaxonomy } = useAppliedOntology(field);
 
   const classes = useMemo(() => config?.classes || [], [config?.classes]);
   const attributes = useMemo(
     () => config?.attributes || [],
-    [config?.attributes]
+    [config?.attributes],
   );
+  // What the annotate sidebar will render the classes with: an explicit
+  // radio/dropdown choice, else the class-count default applied on save.
+  const classesComponent = useMemo<ClassesComponent>(() => {
+    const component = config ? reconcileComponent(config).component : undefined;
+    return isClassesComponent(component)
+      ? component
+      : defaultClassesComponent(classes);
+  }, [classes, config]);
 
   const handleAddClass = useCallback(
     (name: string) => {
@@ -62,7 +76,7 @@ const GUIContent = ({
       const newClasses = [name, ...classes];
       onConfigChange?.({ ...config, classes: newClasses });
     },
-    [config, classes, onConfigChange]
+    [config, classes, onConfigChange],
   );
 
   const handleEditClass = useCallback(
@@ -71,7 +85,7 @@ const GUIContent = ({
       const newClasses = classes.map((c) => (c === oldName ? newName : c));
       onConfigChange?.({ ...config, classes: newClasses });
     },
-    [config, classes, onConfigChange]
+    [config, classes, onConfigChange],
   );
 
   const handleDeleteClass = useCallback(
@@ -80,7 +94,7 @@ const GUIContent = ({
       const newClasses = classes.filter((c) => c !== name);
       onConfigChange?.({ ...config, classes: newClasses });
     },
-    [config, classes, onConfigChange]
+    [config, classes, onConfigChange],
   );
 
   const handleClassOrderChange = useCallback(
@@ -88,7 +102,15 @@ const GUIContent = ({
       if (!config) return;
       onConfigChange?.({ ...config, classes: newOrder });
     },
-    [config, onConfigChange]
+    [config, onConfigChange],
+  );
+
+  const handleComponentChange = useCallback(
+    (component: ClassesComponent) => {
+      if (!config) return;
+      onConfigChange?.({ ...config, component });
+    },
+    [config, onConfigChange],
   );
 
   const handleAddAttribute = useCallback(
@@ -98,18 +120,18 @@ const GUIContent = ({
       const newAttributes = [attrConfig, ...attributes];
       onConfigChange?.({ ...config, attributes: newAttributes });
     },
-    [config, attributes, onConfigChange]
+    [config, attributes, onConfigChange],
   );
 
   const handleEditAttribute = useCallback(
     (oldName: string, attrConfig: AttributeConfig) => {
       if (!config) return;
       const newAttributes = attributes.map((attr) =>
-        attr.name === oldName ? attrConfig : attr
+        attr.name === oldName ? attrConfig : attr,
       );
       onConfigChange?.({ ...config, attributes: newAttributes });
     },
-    [config, attributes, onConfigChange]
+    [config, attributes, onConfigChange],
   );
 
   const handleDeleteAttribute = useCallback(
@@ -118,7 +140,7 @@ const GUIContent = ({
       const newAttributes = attributes.filter((attr) => attr.name !== name);
       onConfigChange?.({ ...config, attributes: newAttributes });
     },
-    [config, attributes, onConfigChange]
+    [config, attributes, onConfigChange],
   );
 
   const handleAttributeOrderChange = useCallback(
@@ -126,29 +148,27 @@ const GUIContent = ({
       if (!config) return;
       onConfigChange?.({ ...config, attributes: newOrder });
     },
-    [config, onConfigChange]
+    [config, onConfigChange],
   );
 
   // Primitive field types show a different UI
   if (isPrimitive && fType) {
     return (
-      <ListContainer className={scrollable}>
-        <Section>
-          <PrimitiveFieldContent
-            field={field}
-            fieldType={fType}
-            config={config}
-            onConfigChange={onConfigChange}
-            largeLabels
-          />
-        </Section>
-      </ListContainer>
+      <Section>
+        <PrimitiveFieldContent
+          field={field}
+          fieldType={fType}
+          config={config}
+          onConfigChange={onConfigChange}
+          largeLabels
+        />
+      </Section>
     );
   }
 
   if (scanning) {
     return (
-      <ListContainer className={scrollable}>
+      <>
         <Section>
           <EditSectionHeader>
             <Text variant={TextVariant.Lg}>Classes</Text>
@@ -181,20 +201,24 @@ const GUIContent = ({
             </Button>
           </EmptyStateBox>
         </Section>
-      </ListContainer>
+      </>
     );
   }
 
   return (
-    <ListContainer className={scrollable}>
-      <ClassesSection
-        classes={classes}
-        attributeCount={attributes.length}
-        onAddClass={handleAddClass}
-        onEditClass={handleEditClass}
-        onDeleteClass={handleDeleteClass}
-        onOrderChange={handleClassOrderChange}
-      />
+    <>
+      {!appliedTaxonomy && (
+        <ClassesSection
+          classes={classes}
+          attributeCount={attributes.length}
+          component={classesComponent}
+          onAddClass={handleAddClass}
+          onEditClass={handleEditClass}
+          onDeleteClass={handleDeleteClass}
+          onComponentChange={handleComponentChange}
+          onOrderChange={handleClassOrderChange}
+        />
+      )}
       <AttributesSection
         attributes={attributes}
         onAddAttribute={handleAddAttribute}
@@ -202,7 +226,7 @@ const GUIContent = ({
         onDeleteAttribute={handleDeleteAttribute}
         onOrderChange={handleAttributeOrderChange}
       />
-    </ListContainer>
+    </>
   );
 };
 

@@ -26,6 +26,7 @@ fop = lazy_import("fiftyone.core.plots.plotly")
 
 
 EventType = t.Union[
+    "AppCountUpdate",
     "CaptureNotebookCell",
     "CloseSession",
     "DeactivateNotebookCell",
@@ -35,6 +36,8 @@ EventType = t.Union[
     "SetColorScheme",
     "SetGroupSlice",
     "SetSample",
+    "SetLabelSelectionStyle",
+    "SetSampleSelectionStyle",
     "SetSpaces",
     "StateUpdate",
     "SetFieldVisibilityStage",
@@ -93,12 +96,23 @@ class LabelData:
     sample_id: str
     frame_number: t.Optional[int] = None
     instance_id: t.Optional[str] = None
+    type: str = "default"
 
 
 @dataclass
 class Screenshot:
     bytes: bytes
     max_width: int
+
+
+@dataclass
+class AppCountUpdate(Event):
+    """App count update event
+
+    Reports the number of App clients that are connected to the server.
+    """
+
+    count: int
 
 
 @dataclass
@@ -150,7 +164,31 @@ class SelectLabels(Event):
 class SelectSamples(Event):
     """Select samples event"""
 
-    sample_ids: t.List[str]
+    samples: t.List[t.Dict]
+
+
+@dataclass
+class SetSampleSelectionStyle(Event):
+    """Set the sample selection icon style.
+
+    Attributes:
+        style: a dict with ``"default"`` and ``"alt"`` keys mapping to icon
+            style names (e.g. ``"checkmark"``, ``"thumbsup"``, etc.)
+    """
+
+    style: t.Dict
+
+
+@dataclass
+class SetLabelSelectionStyle(Event):
+    """Set the label selection visual style.
+
+    Attributes:
+        style: a dict with ``"default"`` and ``"alt"`` keys mapping to label
+            selection style names (e.g. ``"dashed"``, ``"dashed-red"``, etc.)
+    """
+
+    style: t.Dict
 
 
 @dataclass

@@ -9,6 +9,7 @@ You must run these tests interactively as follows::
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 from bson import ObjectId
 from collections import defaultdict
 import numpy as np
@@ -57,7 +58,7 @@ def _delete_shape(api, task_id, label_id):
 
 
 def _get_label(api, task_id, label=None):
-    attr_id_map, class_id_map = api._get_attr_class_maps(task_id)
+    attr_id_map, _, class_id_map = api._get_attr_class_maps(task_id)
     if isinstance(label, str):
         label = class_id_map[label]
     else:
@@ -186,7 +187,7 @@ def _update_shape(
         if group_id is not None:
             shape["group"] = group_id
         if attributes is not None:
-            attr_id_map, class_id_map = api._get_attr_class_maps(task_id)
+            attr_id_map, _, class_id_map = api._get_attr_class_maps(task_id)
             if label is None:
                 label_id = shape["label_id"]
                 attr_id_map = attr_id_map[label_id]

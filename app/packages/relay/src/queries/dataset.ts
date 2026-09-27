@@ -18,6 +18,7 @@ export default graphql`
 
     dataset(name: $name, view: $extendedView, savedViewSlug: $savedViewSlug) {
       name
+      mediaType
       defaultGroupSlice
       viewName
       savedViewSlug
@@ -57,6 +58,13 @@ export default graphql`
               color
             }
           }
+          temporalTags {
+            fieldColor
+            valueColors {
+              value
+              color
+            }
+          }
           fields {
             colorByAttribute
             fieldColor
@@ -83,6 +91,7 @@ export default graphql`
     }
     ...savedViewsFragment
     ...configFragment
+    ...expressionCatalogFragment
     ...stageDefinitionsFragment
     ...viewSchemaFragment
   }

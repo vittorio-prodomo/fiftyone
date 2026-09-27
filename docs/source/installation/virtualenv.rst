@@ -21,12 +21,12 @@ First, identify a suitable Python executable. On many systems, this will be
 Python version, pass `--version` to Python. Here is example output from running
 these commands:
 
-.. code-block:: text
+.. code-block:: console
 
    $ python --version
    Python 2.7.17
    $ python3 --version
-   Python 3.9.20
+   Python 3.10.20
 
 In this case, `python3` should be used in the next step.
 
@@ -56,7 +56,7 @@ install packages to. However, this environment will not be used until it is
 
   .. group-tab:: Windows
 
-    .. code-block:: text
+    .. code-block:: bat
 
        env\Scripts\activate.bat
 
@@ -68,10 +68,10 @@ is active, `python` without any suffix will refer to the Python version you
 used to create the virtual environment, so you can use this for the remainder
 of this guide. For example:
 
-.. code-block:: text
+.. code-block:: console
 
    $ python --version
-   Python 3.9.20
+   Python 3.10.20
 
 Also note that `python` and `pip` live inside the `env` folder (in this output,
 the path to the current folder is replaced with `...`):
@@ -80,7 +80,7 @@ the path to the current folder is replaced with `...`):
 
   .. group-tab:: Linux/macOS
 
-    .. code-block:: text
+    .. code-block:: console
 
       $ which python
       .../env/bin/python
@@ -89,7 +89,7 @@ the path to the current folder is replaced with `...`):
 
   .. group-tab:: Windows
 
-    .. code-block:: text
+    .. code-block:: doscon
 
       > where python
       ...\env\Scripts\python.exe

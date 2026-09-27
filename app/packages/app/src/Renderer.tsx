@@ -1,7 +1,11 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import type { Queries } from "./makeRoutes";
 import type { Entry } from "./routing";
 
-import { Loading, Pending } from "@fiftyone/components";
+import { Pending } from "@fiftyone/components";
 import { subscribe } from "@fiftyone/relay";
 import {
   isModalActive,
@@ -9,9 +13,11 @@ import {
   themeConfig,
   useSetExpandedSample,
   useSetModalState,
+  useViewChangePending,
+  viewChangePending,
 } from "@fiftyone/state";
 import { useColorScheme } from "@mui/material";
-import React, {
+import {
   Suspense,
   useCallback,
   useEffect,
@@ -26,6 +32,7 @@ import {
   useSetRecoilState,
 } from "recoil";
 import { useRouterContext } from "./routing";
+import Pixelating from "./Pixelating";
 
 export const pendingEntry = atom<boolean>({
   key: "pendingEntry",
@@ -56,6 +63,7 @@ const Renderer = () => {
   const routeEntry = useRecoilValue(entry);
 
   const [pending, setPending] = useRecoilState(pendingEntry);
+  const viewPending = useViewChangePending();
   const router = useRouterContext();
   const [ready, setReady] = useState(false);
   const setModalState = useSetModalState();
@@ -67,7 +75,7 @@ const Renderer = () => {
         set(entry, result);
         setReady(true);
       },
-    [router]
+    [router],
   );
 
   const init = useCallback(
@@ -76,7 +84,7 @@ const Renderer = () => {
       await setExpansion();
       apply(result);
     },
-    [apply, setExpansion, setModalState]
+    [apply, setExpansion, setModalState],
   );
 
   useEffect(() => {
@@ -84,18 +92,20 @@ const Renderer = () => {
     subscribe((_, { set }) => {
       set(entry, router.get(true));
       set(pendingEntry, false);
+      // An operator-driven view change lands here too; its pending
+      // treatment ends with the entry that carries it
+      set(viewChangePending, false);
     });
   }, [init, router]);
 
   useEffect(() => {
     return router.subscribe(
       () => undefined,
-      () => setPending(true)
+      () => setPending(true),
     );
   }, [router, setPending]);
 
-  const loading = <Loading>Pixelating...</Loading>;
-
+  const loading = <Pixelating />;
   if (!routeEntry || !ready) return loading;
 
   return (
@@ -103,7 +113,7 @@ const Renderer = () => {
       <ColorScheme key={"color-scheme"} />
       <Modal key={"modal"} />
       <Route key={"route"} route={routeEntry} />
-      {pending && <Pending key={"pending"} />}
+      {(pending || viewPending) && <Pending key={"pending"} />}
     </Suspense>
   );
 };

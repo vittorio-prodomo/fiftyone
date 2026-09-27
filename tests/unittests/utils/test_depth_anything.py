@@ -1,0 +1,649 @@
+"""
+Tests for fiftyone/utils/depth_anything.py Depth Anything V3 model wrapper.
+
+| Copyright 2017-2026, Voxel51, Inc.
+| `voxel51.com <https://voxel51.com/>`_
+|
+"""
+
+import inspect
+import os
+from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from fiftyone.utils.depth_anything import (
+        DepthAnythingV3Model,
+        DepthAnythingV3OutputProcessor,
+    )
+
+import numpy as np
+import pytest
+import torch
+
+
+class TestDepthAnythingV3ModelConfig:
+    """Test DepthAnythingV3ModelConfig parsing and defaults."""
+
+    def test_default_config(self):
+        """Test default configuration values."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config = DepthAnythingV3ModelConfig({})
+
+        assert config.name_or_path == "depth-anything/da3-base"
+        assert config.raw_inputs is True
+        assert config.output_processor_cls == (
+            "fiftyone.utils.depth_anything.DepthAnythingV3OutputProcessor"
+        )
+
+    def test_custom_name_or_path(self):
+        """Test custom name_or_path overrides default."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config = DepthAnythingV3ModelConfig(
+            {"name_or_path": "depth-anything/da3-large"}
+        )
+
+        assert config.name_or_path == "depth-anything/da3-large"
+
+    def test_process_res_default(self):
+        """Test process_res defaults to 504."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config = DepthAnythingV3ModelConfig({})
+
+        assert config.process_res == 504
+        assert config.process_res_method == "upper_bound_resize"
+
+    def test_process_res_explicit(self):
+        """Test process_res can be set explicitly."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config = DepthAnythingV3ModelConfig(
+            {
+                "process_res": 336,
+                "process_res_method": "upper_bound_resize",
+            }
+        )
+
+        assert config.process_res == 336
+        assert config.process_res_method == "upper_bound_resize"
+
+    def test_use_ray_pose_default(self):
+        """Test use_ray_pose defaults to False."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config = DepthAnythingV3ModelConfig({})
+
+        assert config.use_ray_pose is False
+
+    def test_use_ray_pose_explicit(self):
+        """Test use_ray_pose can be set explicitly."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config_true = DepthAnythingV3ModelConfig({"use_ray_pose": True})
+        assert config_true.use_ray_pose is True
+
+        config_false = DepthAnythingV3ModelConfig({"use_ray_pose": False})
+        assert config_false.use_ray_pose is False
+
+
+class TestDepthAnythingV3OutputProcessor:
+    """Test DepthAnythingV3OutputProcessor."""
+
+    def _make_processor(self) -> "DepthAnythingV3OutputProcessor":
+        from fiftyone.utils.depth_anything import (
+            DepthAnythingV3OutputProcessor,
+        )
+
+        return DepthAnythingV3OutputProcessor()
+
+    def test_invalid_output_type_raises(self):
+        """Test non-dict input raises TypeError."""
+        processor = self._make_processor()
+
+        with pytest.raises(TypeError, match="Expected dict output"):
+            processor("not a dict", (100, 100))
+
+        with pytest.raises(TypeError, match="Expected dict output"):
+            processor([1, 2, 3], (100, 100))
+
+    def test_missing_depth_key_raises(self):
+        """Test missing depth key raises KeyError."""
+        processor = self._make_processor()
+
+        with pytest.raises(KeyError, match="missing 'depth' key"):
+            processor({"other": 123}, (100, 100))
+
+        with pytest.raises(KeyError, match="missing 'depth' key"):
+            processor({}, (100, 100))
+
+    def test_tensor_to_numpy_conversion_preserves_values(self):
+        """Test torch.Tensor values are preserved after conversion."""
+        processor = self._make_processor()
+        depth_values = np.array([[[0.2, 0.4], [0.6, 0.8]]], dtype=np.float32)
+        depth_tensor = torch.from_numpy(depth_values.copy())
+
+        results = processor({"depth": depth_tensor}, (2, 2))
+
+        expected_normalized = depth_values[0] / 0.8
+        np.testing.assert_array_almost_equal(
+            results[0].map, expected_normalized, decimal=5
+        )
+
+    def test_2d_depth_expansion_produces_single_heatmap(self):
+        """Test 2D depth array is expanded and processed as single image."""
+        processor = self._make_processor()
+        depth_2d = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+
+        results = processor({"depth": depth_2d}, (2, 2))
+
+        assert len(results) == 1
+        expected = depth_2d / 4.0
+        np.testing.assert_array_almost_equal(
+            results[0].map, expected, decimal=5
+        )
+
+    def test_depth_normalization_scales_to_unit_range(self):
+        """Test depth values are normalized to [0, 1] with max=1."""
+        processor = self._make_processor()
+        depth = np.array([[[10.0, 20.0], [30.0, 40.0]]], dtype=np.float32)
+
+        results = processor({"depth": depth}, (2, 2))
+
+        heatmap = results[0]
+        assert heatmap.map.max() == pytest.approx(1.0)
+        assert heatmap.map.min() == pytest.approx(0.25)
+        assert heatmap.map[0, 0] == pytest.approx(0.25)
+        assert heatmap.map[0, 1] == pytest.approx(0.50)
+        assert heatmap.map[1, 0] == pytest.approx(0.75)
+        assert heatmap.map[1, 1] == pytest.approx(1.00)
+
+    def test_depth_normalization_zero_max_returns_zeros(self):
+        """Test zero max depth returns zeros without division error."""
+        processor = self._make_processor()
+        depth = np.zeros((1, 10, 10), dtype=np.float32)
+
+        results = processor({"depth": depth}, (10, 10))
+
+        assert results[0].map.shape == (10, 10)
+        assert np.all(results[0].map == 0)
+
+    def test_output_dtype_is_float32(self):
+        """Test output heatmap dtype is float32 regardless of input dtype."""
+        processor = self._make_processor()
+
+        for input_dtype in [np.float32, np.float64, np.int32]:
+            depth = np.ones((1, 5, 5), dtype=input_dtype) * 10
+            results = processor({"depth": depth}, (5, 5))
+            assert results[0].map.dtype == np.float32
+
+    def test_resize_interpolates_to_frame_size(self):
+        """Test depth is resized to match frame_size with interpolation."""
+        processor = self._make_processor()
+        depth = np.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=np.float32)
+
+        results = processor({"depth": depth}, (4, 4))
+
+        assert results[0].map.shape == (4, 4)
+        corners = [
+            results[0].map[0, 0],
+            results[0].map[0, 3],
+            results[0].map[3, 0],
+            results[0].map[3, 3],
+        ]
+        assert corners[0] < corners[1] < corners[2] < corners[3]
+
+    def test_batch_processing_normalizes_each_independently(self):
+        """Test each depth map in batch is normalized independently."""
+        processor = self._make_processor()
+        depth = np.array(
+            [
+                [[0.0, 10.0], [10.0, 10.0]],
+                [[0.0, 100.0], [100.0, 100.0]],
+            ],
+            dtype=np.float32,
+        )
+
+        results = processor({"depth": depth}, (2, 2))
+
+        assert len(results) == 2
+        assert results[0].map.max() == pytest.approx(1.0)
+        assert results[1].map.max() == pytest.approx(1.0)
+        np.testing.assert_array_almost_equal(
+            results[0].map, results[1].map, decimal=5
+        )
+
+    def test_metric_output_stores_max_depth(self):
+        """Test metric models store max_depth for meter recovery."""
+        processor = self._make_processor()
+        depth = np.array([[[10.0, 20.0], [30.0, 40.0]]], dtype=np.float32)
+
+        results = processor({"depth": depth, "is_metric": True}, (2, 2))
+
+        assert results[0].is_metric is True
+        assert results[0].max_depth == pytest.approx(40.0)
+        recovered = results[0].map * results[0].max_depth
+        np.testing.assert_array_almost_equal(recovered, depth[0], decimal=5)
+
+    def test_relative_output_no_max_depth(self):
+        """Test relative models do not store max_depth."""
+        processor = self._make_processor()
+        depth = np.array([[[10.0, 20.0], [30.0, 40.0]]], dtype=np.float32)
+
+        results = processor({"depth": depth, "is_metric": False}, (2, 2))
+
+        assert results[0].is_metric is False
+        assert (
+            not hasattr(results[0], "max_depth")
+            or results[0].max_depth is None
+        )
+
+    def test_none_frame_size_skips_resize(self):
+        """Test None dimensions in frame_size skips resize."""
+        processor = self._make_processor()
+        depth = np.random.rand(1, 50, 60).astype(np.float32)
+
+        results = processor({"depth": depth}, (None, None))
+
+        assert results[0].map.shape == (50, 60)
+
+    def test_scale_factor_surfaced_on_first_heatmap(self):
+        """Test scale_factor from prediction is attached to first heatmap."""
+        processor = self._make_processor()
+        depth = np.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=np.float32)
+
+        results = processor({"depth": depth, "scale_factor": 0.42}, (2, 2))
+
+        assert results[0].scale_factor == pytest.approx(0.42)
+
+    def test_scale_factor_absent_when_not_provided(self):
+        """Test scale_factor is not set when missing from output."""
+        processor = self._make_processor()
+        depth = np.array([[[1.0, 2.0], [3.0, 4.0]]], dtype=np.float32)
+
+        results = processor({"depth": depth}, (2, 2))
+
+        assert (
+            not hasattr(results[0], "scale_factor")
+            or results[0].scale_factor is None
+        )
+
+    def test_scale_factor_surfaced_on_all_heatmaps(self):
+        """Test scale_factor is attached to every heatmap in a batch."""
+        processor = self._make_processor()
+        depth = np.array(
+            [
+                [[1.0, 2.0], [3.0, 4.0]],
+                [[2.0, 3.0], [4.0, 5.0]],
+            ],
+            dtype=np.float32,
+        )
+
+        results = processor({"depth": depth, "scale_factor": 0.42}, (2, 2))
+
+        assert len(results) == 2
+        assert results[0].scale_factor == pytest.approx(0.42)
+        assert results[1].scale_factor == pytest.approx(0.42)
+
+    def test_batched_scale_factor_tensor_is_scalarized_per_heatmap(self):
+        """Test batched tensor scale_factor is converted per heatmap."""
+        processor = self._make_processor()
+        depth = np.array(
+            [
+                [[1.0, 2.0], [3.0, 4.0]],
+                [[2.0, 3.0], [4.0, 5.0]],
+            ],
+            dtype=np.float32,
+        )
+
+        results = processor(
+            {
+                "depth": depth,
+                "scale_factor": torch.tensor(
+                    [0.42, 0.84], dtype=torch.float32
+                ),
+            },
+            (2, 2),
+        )
+
+        assert len(results) == 2
+        assert isinstance(results[0].scale_factor, float)
+        assert isinstance(results[1].scale_factor, float)
+        assert results[0].scale_factor == pytest.approx(0.42)
+        assert results[1].scale_factor == pytest.approx(0.84)
+
+    def test_scale_factor_short_batch_drops_for_all_heatmaps(self):
+        """Test scale_factor is dropped when it is shorter than the batch."""
+        processor = self._make_processor()
+        depth = np.array(
+            [
+                [[1.0, 2.0], [3.0, 4.0]],
+                [[2.0, 3.0], [4.0, 5.0]],
+            ],
+            dtype=np.float32,
+        )
+
+        results = processor(
+            {
+                "depth": depth,
+                "scale_factor": torch.tensor([0.42], dtype=torch.float32),
+            },
+            (2, 2),
+        )
+
+        assert len(results) == 2
+        for heatmap in results:
+            assert getattr(heatmap, "scale_factor", None) is None
+
+
+class TestDepthAnythingV3ModelConfigNewParams:
+    """Test new config parameters: ref_view_strategy, align_to_input_ext_scale."""
+
+    def test_ref_view_strategy_default(self):
+        """Test ref_view_strategy defaults to saddle_balanced."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config = DepthAnythingV3ModelConfig({})
+
+        assert config.ref_view_strategy == "saddle_balanced"
+
+    def test_ref_view_strategy_explicit(self):
+        """Test ref_view_strategy can be set to each valid value."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        for strategy in (
+            "first",
+            "middle",
+            "saddle_balanced",
+            "saddle_sim_range",
+        ):
+            config = DepthAnythingV3ModelConfig(
+                {"ref_view_strategy": strategy}
+            )
+            assert config.ref_view_strategy == strategy
+
+    def test_align_to_input_ext_scale_default(self):
+        """Test align_to_input_ext_scale defaults to True."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config = DepthAnythingV3ModelConfig({})
+
+        assert config.align_to_input_ext_scale is True
+
+    def test_align_to_input_ext_scale_explicit(self):
+        """Test align_to_input_ext_scale can be set explicitly."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        config_false = DepthAnythingV3ModelConfig(
+            {"align_to_input_ext_scale": False}
+        )
+        assert config_false.align_to_input_ext_scale is False
+
+        config_true = DepthAnythingV3ModelConfig(
+            {"align_to_input_ext_scale": True}
+        )
+        assert config_true.align_to_input_ext_scale is True
+
+    def test_ref_view_strategy_invalid_raises(self):
+        """Test invalid ref_view_strategy values fail fast."""
+        from fiftyone.utils.depth_anything import DepthAnythingV3ModelConfig
+
+        with pytest.raises(ValueError, match="Unsupported ref_view_strategy"):
+            DepthAnythingV3ModelConfig({"ref_view_strategy": "typo"})
+
+
+class _FakeSample(dict):
+    def __init__(self, filepath: str) -> None:
+        super().__init__()
+        self.filepath = filepath
+
+
+class _FakeCollection:
+    def __init__(self, samples: list["_FakeSample"]) -> None:
+        self._samples = samples
+
+    def iter_samples(
+        self,
+        autosave: bool = True,
+        progress: Optional[bool] = None,
+    ) -> Iterator["_FakeSample"]:
+        return iter(self._samples)
+
+
+class _FakeFilenameMaker:
+    def __init__(
+        self,
+        output_dir: str,
+        rel_dir: Optional[str] = None,
+        ignore_existing: bool = False,
+    ) -> None:
+        self.output_dir = output_dir
+
+    def get_output_path(self, filepath: str, output_ext: str = "") -> str:
+        return os.path.join(self.output_dir, "sample")
+
+
+def _make_export_model(config_dict: Optional[dict] = None):
+    """A DepthAnythingV3Model with a real config and a recording inference."""
+    from fiftyone.utils.depth_anything import (
+        DepthAnythingV3Model,
+        DepthAnythingV3ModelConfig,
+    )
+
+    calls = []
+
+    def _fake_inference(filepaths: list[str], **kwargs: Any) -> None:
+        calls.append((filepaths, kwargs))
+        gs_video_dir = os.path.join(kwargs["export_dir"], "gs_video")
+        os.makedirs(gs_video_dir, exist_ok=True)
+        with open(os.path.join(gs_video_dir, "0000_wander.mp4"), "wb") as f:
+            f.write(b"")
+
+    model = DepthAnythingV3Model.__new__(DepthAnythingV3Model)
+    model.config = DepthAnythingV3ModelConfig(config_dict or {})
+    model._model = SimpleNamespace(inference=_fake_inference)
+    return model, calls
+
+
+class TestDepthAnythingV3Exports:
+    def test_compute_3d_exports_uses_keyword_only_args_and_sets_gs_video_path(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        import fiftyone.utils.depth_anything as foda
+
+        monkeypatch.setattr(
+            foda.fov, "validate_collection", lambda samples: None
+        )
+        monkeypatch.setattr(
+            foda.fou, "UniqueFilenameMaker", _FakeFilenameMaker
+        )
+
+        model, calls = _make_export_model()
+        export_dir = str(tmp_path / "exports")
+        sample = _FakeSample(str(tmp_path / "data" / "image.png"))
+
+        model.compute_3d_exports(
+            _FakeCollection([sample]),
+            export_dir,
+            export_format="gs_video",
+            conf_thresh_percentile=12.5,
+            num_max_points=123,
+            show_cameras=False,
+        )
+
+        signature = inspect.signature(model.compute_3d_exports)
+        assert (
+            signature.parameters["conf_thresh_percentile"].kind
+            is inspect.Parameter.KEYWORD_ONLY
+        )
+        assert (
+            signature.parameters["num_max_points"].kind
+            is inspect.Parameter.KEYWORD_ONLY
+        )
+        assert (
+            signature.parameters["show_cameras"].kind
+            is inspect.Parameter.KEYWORD_ONLY
+        )
+
+        assert len(calls) == 1
+        _, kwargs = calls[0]
+        assert kwargs["infer_gs"] is True
+        assert kwargs["export_format"] == "gs_video"
+        assert kwargs["conf_thresh_percentile"] == pytest.approx(12.5)
+        assert kwargs["num_max_points"] == 123
+        assert kwargs["show_cameras"] is False
+        assert sample["da3_export_path"] == os.path.join(
+            export_dir, "sample", "gs_video", "0000_wander.mp4"
+        )
+
+    def test_compute_3d_exports_forwards_model_config(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """The export path applies the same config as depth prediction."""
+        import fiftyone.utils.depth_anything as foda
+
+        monkeypatch.setattr(
+            foda.fov, "validate_collection", lambda samples: None
+        )
+        monkeypatch.setattr(
+            foda.fou, "UniqueFilenameMaker", _FakeFilenameMaker
+        )
+
+        model, calls = _make_export_model(
+            {
+                "process_res": 336,
+                "process_res_method": "lower_bound_resize",
+                "use_ray_pose": True,
+                "ref_view_strategy": "middle",
+                "align_to_input_ext_scale": True,
+            }
+        )
+        sample = _FakeSample(str(tmp_path / "data" / "image.png"))
+
+        model.compute_3d_exports(
+            _FakeCollection([sample]),
+            str(tmp_path / "exports"),
+            export_format="gs_video",
+        )
+
+        _, kwargs = calls[0]
+        assert kwargs["process_res"] == 336
+        assert kwargs["process_res_method"] == "lower_bound_resize"
+        assert kwargs["use_ray_pose"] is True
+        assert kwargs["ref_view_strategy"] == "middle"
+        assert kwargs["align_to_input_ext_scale"] is True
+        assert kwargs["export_feat_layers"] == []
+
+    def test_compute_3d_exports_escapes_glob_metacharacters(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """An export directory containing [ ] still resolves the MP4."""
+        import fiftyone.utils.depth_anything as foda
+
+        monkeypatch.setattr(
+            foda.fov, "validate_collection", lambda samples: None
+        )
+        monkeypatch.setattr(
+            foda.fou, "UniqueFilenameMaker", _FakeFilenameMaker
+        )
+
+        model, _ = _make_export_model()
+        export_dir = str(tmp_path / "exports [v1]")
+        sample = _FakeSample(str(tmp_path / "data" / "image.png"))
+
+        model.compute_3d_exports(
+            _FakeCollection([sample]),
+            export_dir,
+            export_format="gs_video",
+        )
+
+        assert sample["da3_export_path"] == os.path.join(
+            export_dir, "sample", "gs_video", "0000_wander.mp4"
+        )
+
+
+class TestDepthAnythingV3InferenceForwarding:
+    """The config reaches self._model.inference, not just the config object."""
+
+    @staticmethod
+    def _make_model(
+        config_dict: dict[str, Any],
+        scale_factor: Optional[float] = None,
+    ) -> tuple["DepthAnythingV3Model", list[tuple[Any, dict[str, Any]]]]:
+        """Returns a model whose inference is stubbed, and the list that
+        records each ``(inputs, kwargs)`` it was called with."""
+        from fiftyone.utils.depth_anything import (
+            DepthAnythingV3Model,
+            DepthAnythingV3ModelConfig,
+        )
+
+        calls = []
+
+        def _fake_inference(inputs, **kwargs):
+            calls.append((inputs, kwargs))
+            return SimpleNamespace(
+                depth=np.zeros((1, 2, 2), dtype=np.float32),
+                conf=None,
+                sky=None,
+                extrinsics=None,
+                intrinsics=None,
+                gaussians=None,
+                aux=None,
+                scale_factor=scale_factor,
+            )
+
+        model = DepthAnythingV3Model.__new__(DepthAnythingV3Model)
+        model.config = DepthAnythingV3ModelConfig(config_dict)
+        model._model = SimpleNamespace(inference=_fake_inference)
+        return model, calls
+
+    def test_forward_pass_forwards_config(self) -> None:
+        model, calls = self._make_model(
+            {
+                "process_res": 336,
+                "process_res_method": "lower_bound_resize",
+                "use_ray_pose": True,
+                "ref_view_strategy": "first",
+                "align_to_input_ext_scale": True,
+            }
+        )
+
+        model._forward_pass([np.zeros((2, 2, 3), dtype=np.uint8)])
+
+        _, kwargs = calls[0]
+        assert kwargs["process_res"] == 336
+        assert kwargs["process_res_method"] == "lower_bound_resize"
+        assert kwargs["use_ray_pose"] is True
+        assert kwargs["ref_view_strategy"] == "first"
+        assert kwargs["align_to_input_ext_scale"] is True
+
+    def test_compute_multiview_depth_forwards_config(self) -> None:
+        model, calls = self._make_model(
+            {
+                "ref_view_strategy": "saddle_sim_range",
+                "align_to_input_ext_scale": False,
+            }
+        )
+
+        model.compute_multiview_depth(["a.png"])
+
+        _, kwargs = calls[0]
+        assert kwargs["ref_view_strategy"] == "saddle_sim_range"
+        assert kwargs["align_to_input_ext_scale"] is False
+
+    def test_forward_pass_preserves_scale_factor(self) -> None:
+        model, _ = self._make_model({}, scale_factor=0.42)
+
+        output = model._forward_pass([np.zeros((2, 2, 3), dtype=np.uint8)])
+
+        assert output["scale_factor"] == pytest.approx(0.42)
+
+    def test_compute_multiview_depth_preserves_scale_factor(self) -> None:
+        model, _ = self._make_model({}, scale_factor=0.42)
+
+        results = model.compute_multiview_depth(["a.png"])
+
+        assert results[0].scale_factor == pytest.approx(0.42)

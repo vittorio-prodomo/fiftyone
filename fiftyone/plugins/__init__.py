@@ -5,6 +5,7 @@ FiftyOne plugins.
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 import types
 
 from .core import (
@@ -27,6 +28,7 @@ from .core import (
 from .definitions import PluginDefinition
 from .context import PluginContext
 from .secrets import PluginSecretsResolver
+from .skills import list_skills
 
 # This enables Sphinx refs to directly use paths imported here
 __all__ = [

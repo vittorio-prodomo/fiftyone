@@ -2,9 +2,9 @@
  * Copyright 2017-2026, Voxel51, Inc.
  */
 
-import { BoundingBoxOverlay } from "../overlay/BoundingBoxOverlay";
+import { DetectionOverlay } from "../overlay/DetectionOverlay";
 import type { Point } from "../types";
-import type { InteractionHandler } from "./InteractionManager";
+import type { InteractionHandler, OverlayEvent } from "./InteractionManager";
 
 const INTERACTIVE_DETECTION_HANDLER_ID = "interactive-detection-handler";
 
@@ -20,38 +20,34 @@ export class InteractiveDetectionHandler implements InteractionHandler {
   private _isDragging = false;
   private startPoint?: Point;
 
-  constructor(public readonly overlay: BoundingBoxOverlay) {}
+  constructor(public readonly overlay: DetectionOverlay) {}
 
   containsPoint(): boolean {
     return true;
   }
 
-  getOverlay(): BoundingBoxOverlay {
+  getOverlay(): DetectionOverlay {
     return this.overlay;
   }
 
   resetOverlay(): void {
-    this.overlay.unsetBounds();
+    this.overlay.bounds = undefined;
   }
 
   markDirty(): void {
     this.overlay.markDirty();
   }
 
-  onPointerDown(
-    point: Point,
-    _worldPoint: Point,
-    _event: PointerEvent
-  ): boolean {
+  onPointerDown({ point }: OverlayEvent): boolean {
     this.startPoint = point;
     this._isDragging = true;
     this.overlay.toggleSelected();
-    this.overlay.setBounds({
+    this.overlay.bounds = {
       x: point.x,
       y: point.y,
       width: 0,
       height: 0,
-    });
+    };
 
     return true;
   }
@@ -72,17 +68,11 @@ export class InteractiveDetectionHandler implements InteractionHandler {
     const width = Math.abs(point.x - this.startPoint.x);
     const height = Math.abs(point.y - this.startPoint.y);
 
-    this.overlay.setBounds({ x, y, width, height });
+    this.overlay.bounds = { x, y, width, height };
     return true;
   }
 
-  onMove(
-    point: Point,
-    _worldPoint: Point,
-    _event: PointerEvent,
-    _scale: number,
-    _maintainAspectRatio?: boolean
-  ): boolean {
+  onMove({ point }: OverlayEvent): boolean {
     return this.updateBounds(point);
   }
 
@@ -90,13 +80,13 @@ export class InteractiveDetectionHandler implements InteractionHandler {
     return this.updateBounds(point);
   }
 
-  onPointerUp(_point: Point, _event: PointerEvent): boolean {
+  onPointerUp(_params: OverlayEvent): boolean {
     if (!this._isDragging || !this.startPoint) {
       this._isDragging = false;
       return false;
     }
 
-    const tempBounds = this.overlay.getAbsoluteBounds();
+    const tempBounds = this.overlay.bounds;
 
     // Only create detection if we have a meaningful size
     const minSize = MIN_PIXELS;

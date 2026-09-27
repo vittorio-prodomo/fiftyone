@@ -15,6 +15,7 @@ export type Optional<T> = {
 // vite won't import these from fou
 export type RGB = [number, number, number];
 export type RGBA = [number, number, number, number];
+export type LabelSelectionStyleName = "dashed" | "dashed-green" | "dashed-red";
 export interface Coloring {
   by: COLOR_BY.FIELD | COLOR_BY.INSTANCE | COLOR_BY.VALUE;
   pool: readonly string[];
@@ -95,8 +96,15 @@ export type Sample = {
     name: string;
   };
   tags: string[];
-  _label_tags: string[];
-  _media_type: "image" | "video" | "point-cloud" | "3d";
+  _label_tags?: Record<string, number>;
+  _media_type:
+    | "image"
+    | "video"
+    | "pcd"
+    | "point_cloud"
+    | "point-cloud"
+    | "three_d"
+    | "3d";
   last_modified_at?: { datetime: number };
 } & GenericLabel;
 
@@ -140,7 +148,7 @@ export type Action<State extends BaseState> = (
   update: StateUpdate<State>,
   dispatchEvent: DispatchEvent,
   eventKey?: string,
-  shiftKey?: boolean
+  shiftKey?: boolean,
 ) => void;
 
 export enum ControlEventKeyType {
@@ -178,20 +186,36 @@ export interface BaseOptions {
   colorscale: Colorscale;
   labelTagColors: CustomizeColor;
   selectedLabels: string[];
+  selectedLabelTypes: Record<string, string>;
+  labelSelectionStyle: {
+    default: LabelSelectionStyleName;
+    alt: LabelSelectionStyleName;
+  };
   selectedLabelTags?: string[];
   attributeVisibility: object;
-  showConfidence: boolean;
   showControls: boolean;
-  showIndex: boolean;
   showJSON: boolean;
   showHelp: boolean;
-  showLabel: boolean;
   showOverlays: boolean;
+  showPatchLabels: boolean;
+  shownLabelAttributes: { [path: string]: string[] };
   showTooltip: boolean;
   onlyShowHoveredLabel: boolean;
   smoothMasks: boolean;
   zoomPad: number;
   selected: boolean;
+  selectionType: "default" | "alt" | null;
+  selectionIcon:
+    | "checkmark"
+    | "green-checkmark"
+    | "red-checkmark"
+    | "thumbsup"
+    | "thumbsdown"
+    | "pin"
+    | "star"
+    | "x"
+    | "bookmark"
+    | null;
   shouldHandleKeyEvents?: boolean;
   inSelectionMode: boolean;
   timeZone: string;
@@ -204,6 +228,7 @@ export interface BaseOptions {
   pointFilter: (path: string, point: Point) => boolean;
   thumbnailTitle?: (sample: any) => string;
   mediaFallback: boolean;
+  initialViewport?: ViewportState | null;
 }
 
 export type BoundingBox = [number, number, number, number];
@@ -436,8 +461,8 @@ export type StateUpdate<State extends BaseState> = (
   postUpdate?: (
     state: Readonly<State>,
     overlays: Readonly<Overlay<State>[]>,
-    sample: object
-  ) => void
+    sample: object,
+  ) => void,
 ) => void;
 
 export const DEFAULT_BASE_OPTIONS: BaseOptions = {
@@ -445,13 +470,14 @@ export const DEFAULT_BASE_OPTIONS: BaseOptions = {
   isPointcloudDataset: false,
   activePaths: [],
   selectedLabels: [],
+  selectedLabelTypes: {},
+  labelSelectionStyle: { default: "dashed", alt: "dashed" },
   selectedLabelTags: undefined,
-  showConfidence: false,
-  showControls: true,
-  showIndex: false,
+  showControls: false,
   showJSON: false,
   showHelp: false,
-  showLabel: false,
+  showPatchLabels: false,
+  shownLabelAttributes: {},
   showTooltip: false,
   onlyShowHoveredLabel: false,
   filter: null,
@@ -469,6 +495,8 @@ export const DEFAULT_BASE_OPTIONS: BaseOptions = {
   smoothMasks: true,
   zoomPad: 0.2,
   selected: false,
+  selectionType: null,
+  selectionIcon: "checkmark",
   inSelectionMode: false,
   timeZone: "UTC",
   mimetype: "",
@@ -477,10 +505,11 @@ export const DEFAULT_BASE_OPTIONS: BaseOptions = {
   skeletons: {},
   showSkeletons: true,
   showOverlays: true,
-  pointFilter: (path: string, point: Point) => true,
+  pointFilter: (_path: string, _point: Point) => true,
   attributeVisibility: {},
   mediaFallback: false,
   shouldHandleKeyEvents: true,
+  initialViewport: null,
 };
 
 export const DEFAULT_FRAME_OPTIONS: FrameOptions = {
@@ -527,4 +556,10 @@ export interface FrameChunkResponse extends FrameChunk {
   frames: FrameSample[];
   range: [number, number];
   error?: boolean;
+}
+
+export interface ViewportState {
+  readonly scale: number;
+  readonly panX: number;
+  readonly panY: number;
 }

@@ -1,15 +1,22 @@
 import {
-  SampleMutationManager,
-  useSampleMutationManager,
+  useActiveSampleId,
+  useAnnotationEngine,
+  useSampleInstance,
+  useSampleSelector,
 } from "@fiftyone/annotation";
 import {
   DelegatingUndoable,
   KnownContexts,
   useCreateCommand,
 } from "@fiftyone/commands";
-import { isNullish, Primitive } from "@fiftyone/utilities";
+import { isNullish, Primitive, Sample } from "@fiftyone/utilities";
 import { Orientation, Stack } from "@voxel51/voodo";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useFramePrimitiveValue,
+  useIsFramePrimitive,
+  usePlayheadFrame,
+} from "../useFramePrimitive";
 import PrimitiveRenderer from "./PrimitiveRenderer";
 import { generatePrimitiveSchema, PrimitiveSchema } from "./schemaHelpers";
 import {
@@ -29,24 +36,57 @@ export default function PrimitiveEdit({
 }: PrimitiveEditProps) {
   const { type } = currentLabelSchema;
 
-  const sampleMutationManager = useSampleMutationManager();
-  const value = sampleMutationManager.getPathValue(path);
+  const sample = useSampleInstance();
+  const sampleId = useActiveSampleId();
+  const engine = useAnnotationEngine();
+
+  // in a dynamic group played as video each frame is its own member sample, so
+  // a frame-scoped primitive reads and writes at the playhead, not the anchor
+  const isFramePrimitive = useIsFramePrimitive(path);
+  const frame = usePlayheadFrame();
+  const framePrimitive = useFramePrimitiveValue(path);
+  const samplePrimitive = useSampleSelector((s) =>
+    s.getResolved<Primitive>(path),
+  );
+  const value = isFramePrimitive ? framePrimitive : samplePrimitive;
+
+  const writeField = useCallback(
+    (next: unknown) => {
+      if (!isFramePrimitive) {
+        sample.setField(path, next);
+        return;
+      }
+
+      if (frame !== undefined) {
+        engine.setFrameValue({ sample: sampleId, path, frame }, next);
+      }
+    },
+    [engine, frame, isFramePrimitive, path, sample, sampleId],
+  );
+
+  const clearField = useCallback(() => {
+    if (!isFramePrimitive) {
+      sample.deleteField(path);
+      return;
+    }
+
+    if (frame !== undefined) {
+      engine.deleteFrameValue({ sample: sampleId, path, frame });
+    }
+  }, [engine, frame, isFramePrimitive, path, sample, sampleId]);
 
   const primitiveSchema = generatePrimitiveSchema(path, currentLabelSchema);
 
-  const [fieldValue, setFieldValue] = useState<Primitive | Date>(
-    parseDatabaseValue(type, value)
+  const [fieldValue, setFieldValue] = useState<Primitive>(
+    parseDatabaseValue(value),
   );
 
   // synchronize external value changes with field
-  useEffect(
-    () => setFieldValue(parseDatabaseValue(type, value)),
-    [type, value]
-  );
+  useEffect(() => setFieldValue(parseDatabaseValue(value)), [value]);
 
   // need to use a ref to access field value in command callback;
   // command will run before the next render loop when `fieldValue` is updated.
-  const transientFieldValue = useRef<Primitive>(fieldValue as Primitive);
+  const transientFieldValue = useRef<Primitive>(fieldValue);
 
   // undoable command which handles primitive edits
   const editCommand = useCreateCommand(
@@ -55,7 +95,7 @@ export default function PrimitiveEdit({
     useCallback(() => {
       const oldValue = value;
       const newValue = transientFieldValue.current;
-      const isAddOperation = isAdd(path, sampleMutationManager);
+      const isAddOperation = isAdd(path, sample);
 
       return new DelegatingUndoable(
         `primitive-edit-${path}-action`,
@@ -63,16 +103,14 @@ export default function PrimitiveEdit({
         () => {
           try {
             const serializedValue = serializeFieldValue(newValue, type);
-            let op = "mutate";
-            if (isAddOperation) {
-              op = "add";
-            } else if (isNullish(serializedValue) || serializedValue === "") {
-              op = "delete";
+            if (
+              !isAddOperation &&
+              (isNullish(serializedValue) || serializedValue === "")
+            ) {
+              clearField();
+            } else {
+              writeField(serializedValue);
             }
-            sampleMutationManager.stageMutation(path, {
-              data: serializedValue,
-              op,
-            });
           } catch (err) {
             console.warn("unparseable value", newValue);
           }
@@ -85,14 +123,15 @@ export default function PrimitiveEdit({
             oldValueSerialized = serializeDatabaseDateValue(oldValue);
           }
 
-          sampleMutationManager.stageMutation(path, {
-            data: oldValueSerialized,
-            op: isAddOperation && !hasOldValue ? "delete" : "mutate",
-          });
-        }
+          if (isAddOperation && !hasOldValue) {
+            clearField();
+          } else {
+            writeField(oldValueSerialized);
+          }
+        },
       );
-    }, [path, sampleMutationManager, type, value]),
-    () => true
+    }, [clearField, path, sample, type, value, writeField]),
+    () => true,
   );
 
   const handleChange = useCallback(
@@ -104,7 +143,7 @@ export default function PrimitiveEdit({
         editCommand.callback();
       }
     },
-    [editCommand]
+    [editCommand],
   );
 
   return (
@@ -119,9 +158,9 @@ export default function PrimitiveEdit({
   );
 }
 
-function isAdd(path: string, sampleMutationManager: SampleMutationManager) {
+function isAdd(path: string, sample: Sample) {
   if (!path.includes(".")) return false;
   const parentPath = path.split(".").slice(0, -1).join(".");
-  const parentValue = sampleMutationManager.getPathValue(parentPath);
+  const parentValue = sample.getResolved(parentPath);
   return isNullish(parentValue);
 }

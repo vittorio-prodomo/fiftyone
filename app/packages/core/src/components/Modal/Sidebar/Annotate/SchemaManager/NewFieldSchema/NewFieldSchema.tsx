@@ -7,10 +7,8 @@
  */
 
 import { scrollable } from "@fiftyone/components";
-import { useSetAtom } from "jotai";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { useOperatorExecutor } from "@fiftyone/operators";
 import { useNotification, useRefresh } from "@fiftyone/state";
 import { is3d } from "@fiftyone/utilities";
 import {
@@ -25,21 +23,32 @@ import {
 } from "@voxel51/voodo";
 
 import {
+  useActiveFieldsList,
+  useAddToExploreActiveFields,
   useExitNewFieldMode,
   useLabelSchemasData,
   useMediaType,
-  useSetActiveLabelSchemas,
   useSetLabelSchemasData,
 } from "../hooks";
+
+import {
+  useSchemaManager,
+  type LabelSchemaConfig,
+} from "../../useSchemaManager";
 
 import AttributesSection from "../EditFieldLabelSchema/GUIContent/AttributesSection";
 import ClassesSection from "../EditFieldLabelSchema/GUIContent/ClassesSection";
 import PrimitiveFieldContent from "../EditFieldLabelSchema/GUIContent/PrimitiveFieldContent";
 import Footer from "../Footer";
 import { ListContainer } from "../styled";
-import { getLabelTypeOptions, validateFieldName } from "../utils";
+import {
+  defaultClassesComponent,
+  getLabelTypeOptions,
+  validateFieldName,
+} from "../utils";
 
 import {
+  type ClassesComponent,
   ATTRIBUTE_TYPE_OPTIONS,
   CATEGORY_LABEL,
   DEFAULT_DETECTION_ATTRIBUTES_2D,
@@ -66,19 +75,26 @@ const NewFieldSchema = () => {
   // Label schema state
   const [classes, setClasses] = useState<string[]>([]);
   const [attributes, setAttributes] = useState<AttributeConfig[]>(
-    DEFAULT_DETECTION_ATTRIBUTES_2D
+    DEFAULT_DETECTION_ATTRIBUTES_2D,
   );
   const [newAttributes, setNewAttributes] = useState<Set<string>>(new Set());
+  // Explicit Radio/Dropdown choice for the classes; undefined = class-count
+  // default, which is what the control shows until the user picks one
+  const [classesComponentChoice, setClassesComponentChoice] = useState<
+    ClassesComponent | undefined
+  >(undefined);
+  const classesComponent =
+    classesComponentChoice ?? defaultClassesComponent(classes);
 
-  const createField = useOperatorExecutor("create_and_activate_field");
-  const getSchemas = useOperatorExecutor("get_label_schemas");
+  const { createAndActivateField, listSchemas } = useSchemaManager();
   const setLabelSchemasData = useSetLabelSchemasData();
-  const setActiveLabelSchemas = useSetActiveLabelSchemas();
+  const { setFields: setActiveFields } = useActiveFieldsList();
   const exitNewFieldMode = useExitNewFieldMode();
   const schemasData = useLabelSchemasData();
   const currentMediaType = useMediaType();
   const is3dMedia = !!(currentMediaType && is3d(currentMediaType));
 
+  const addToExploreActiveFields = useAddToExploreActiveFields();
   const notify = useNotification();
   const refreshSchema = useRefresh();
 
@@ -90,16 +106,23 @@ const NewFieldSchema = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [is3dMedia]);
 
-  // Get label type options based on media type
+  // A "frames." prefix targets the frame schema (video only), which changes
+  // both the valid name pattern and the available label types.
+  const isFrameField = useMemo(
+    () => fieldName.trim().startsWith("frames."),
+    [fieldName],
+  );
+
+  // Get label type options based on media type and field scope
   const labelTypeOptions = useMemo(
-    () => getLabelTypeOptions(currentMediaType),
-    [currentMediaType]
+    () => getLabelTypeOptions(currentMediaType, isFrameField),
+    [currentMediaType, isFrameField],
   );
 
   // Validate field name
   const fieldNameError = useMemo(
-    () => validateFieldName(fieldName, schemasData),
-    [fieldName, schemasData]
+    () => validateFieldName(fieldName, schemasData, currentMediaType),
+    [fieldName, schemasData, currentMediaType],
   );
 
   const canCreate = fieldName.trim() !== "" && !fieldNameError && !isCreating;
@@ -114,9 +137,20 @@ const NewFieldSchema = () => {
       setAttributes(getDefaultAttributesForType(newType, is3dMedia));
       setNewAttributes(new Set());
       setClasses([]);
+      setClassesComponentChoice(undefined);
     },
-    [is3dMedia]
+    [is3dMedia],
   );
+
+  // Keep the selected label type within the options available for the current
+  // field scope — e.g. switching to a "frames." field drops the clip-level
+  // types, so a stale selection must fall back to a valid one.
+  useEffect(() => {
+    const ids = labelTypeOptions.map((option) => option.id);
+    if (category === "label" && !ids.includes(labelType)) {
+      handleLabelTypeChange(labelTypeOptions[0].id);
+    }
+  }, [category, labelType, labelTypeOptions, handleLabelTypeChange]);
 
   const handlePrimitiveTypeChange = useCallback((newType: string) => {
     setPrimitiveType(newType);
@@ -130,7 +164,7 @@ const NewFieldSchema = () => {
     (config: SchemaConfigType) => {
       setPrimitiveConfig(config);
     },
-    []
+    [],
   );
 
   // Class handlers
@@ -159,7 +193,7 @@ const NewFieldSchema = () => {
   const handleEditAttribute = useCallback(
     (oldName: string, config: AttributeConfig) => {
       setAttributes((prev) =>
-        prev.map((attr) => (attr.name === oldName ? config : attr))
+        prev.map((attr) => (attr.name === oldName ? config : attr)),
       );
       if (newAttributes.has(oldName)) {
         setNewAttributes((prev) => {
@@ -170,7 +204,7 @@ const NewFieldSchema = () => {
         });
       }
     },
-    [newAttributes]
+    [newAttributes],
   );
 
   const handleDeleteAttribute = useCallback(
@@ -184,98 +218,92 @@ const NewFieldSchema = () => {
         });
       }
     },
-    [newAttributes]
+    [newAttributes],
   );
 
   const handleAttributeOrderChange = useCallback(
     (newOrder: AttributeConfig[]) => {
       setAttributes(newOrder);
     },
-    []
+    [],
   );
 
-  const handleCreate = useCallback(() => {
+  const handleCreate = useCallback(async () => {
     if (!canCreate) return;
 
     setIsCreating(true);
     const trimmedName = fieldName.trim();
 
-    // Build params
-    const params: Record<string, unknown> = {
-      field_name: trimmedName,
-      field_category: category,
-      field_type: category === "label" ? labelType : primitiveType,
-      read_only: false,
-    };
-
-    if (category === "primitive" && primitiveConfig) {
-      params.schema_config = primitiveConfig;
-    } else if (category === "label") {
-      // Build new_attributes array for data schema creation
+    // Build label schema config for label fields
+    let label_schema_config: LabelSchemaConfig | undefined;
+    if (category === "label") {
       const newAttrsArr = attributes.filter((attr) =>
-        newAttributes.has(attr.name)
+        newAttributes.has(attr.name),
       );
-
-      params.label_schema_config = {
+      label_schema_config = {
         classes,
         attributes,
         new_attributes: newAttrsArr.length > 0 ? newAttrsArr : undefined,
+        // Send what the form shows. With no classes the control is hidden
+        // and the operator applies its own default.
+        component: classes.length > 0 ? classesComponent : undefined,
       };
     }
 
-    createField.execute(params, {
-      callback: (createResult) => {
-        if (createResult.error) {
-          const error = createResult.errorMessage || createResult.error;
+    try {
+      await createAndActivateField({
+        field_name: trimmedName,
+        field_category: category,
+        field_type: category === "label" ? labelType : primitiveType,
+        read_only: false,
+        label_schema_config,
+        schema_config:
+          category === "primitive" && primitiveConfig
+            ? primitiveConfig
+            : undefined,
+      });
 
-          console.error("Failed to create field:", error);
-          notify({
-            msg: `Failed to create field: ${error}`,
-            variant: "error",
-          });
+      const { active_label_schemas, label_schemas } = await listSchemas({});
 
-          setIsCreating(false);
-          return;
-        }
+      setLabelSchemasData(label_schemas);
+      setActiveFields(active_label_schemas);
 
-        // Refresh schemas data
-        getSchemas.execute(
-          {},
-          {
-            callback: (schemasResult) => {
-              setIsCreating(false);
+      // Add the new field to exploreActiveFields so it's
+      // immediately visible (visibleLabelSchemas intersects
+      // activeLabelSchemas with exploreActiveFields).
+      addToExploreActiveFields(trimmedName);
 
-              if (schemasResult.result) {
-                const { active_label_schemas, label_schemas } =
-                  schemasResult.result;
-
-                setLabelSchemasData(label_schemas);
-                setActiveLabelSchemas(active_label_schemas);
-
-                refreshSchema();
-                exitNewFieldMode();
-              }
-            },
-          }
-        );
-      },
-    });
+      refreshSchema();
+      exitNewFieldMode();
+    } catch (error) {
+      console.error("Failed to create field:", error);
+      notify({
+        msg: `Failed to create field: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        variant: "error",
+      });
+    } finally {
+      setIsCreating(false);
+    }
   }, [
+    addToExploreActiveFields,
     attributes,
     canCreate,
     category,
     classes,
-    createField,
+    classesComponent,
+    createAndActivateField,
     exitNewFieldMode,
     fieldName,
-    getSchemas,
     labelType,
+    listSchemas,
     newAttributes,
     notify,
     primitiveConfig,
     primitiveType,
     refreshSchema,
-    setActiveLabelSchemas,
+    setActiveFields,
     setLabelSchemasData,
   ]);
 
@@ -306,7 +334,11 @@ const NewFieldSchema = () => {
               <Input
                 value={fieldName}
                 onChange={(e) => setFieldName(e.target.value)}
-                placeholder="Enter field name"
+                placeholder={
+                  currentMediaType === "video"
+                    ? "Enter field name (e.g. frames.detections)"
+                    : "Enter field name"
+                }
                 error={!!fieldNameError}
                 autoFocus
               />
@@ -376,9 +408,11 @@ const NewFieldSchema = () => {
               <ClassesSection
                 classes={classes}
                 attributeCount={attributes.length}
+                component={classesComponent}
                 onAddClass={handleAddClass}
                 onEditClass={handleEditClass}
                 onDeleteClass={handleDeleteClass}
+                onComponentChange={setClassesComponentChoice}
                 onOrderChange={handleClassOrderChange}
               />
               <AttributesSection

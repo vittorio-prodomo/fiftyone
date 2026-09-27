@@ -23,7 +23,11 @@ import fiftyone.utils.data as foud
 from fiftyone.core.odm.workspace import default_workspace_factory
 
 from .group_by import GroupBy
-from .model_evaluation import ConfigureScenario, ConfigureScenarioPlotResolver
+from .model_evaluation import (
+    ConfigureScenario,
+    ConfigureScenarioPlotResolver,
+    ListScenarios,
+)
 from .annotation import (
     ActivateLabelSchemas,
     CreateAndActivateField,
@@ -36,6 +40,7 @@ from .annotation import (
     UpdateLabelSchema,
     ValidateLabelSchemas,
 )
+from .dataset import DeleteBrainRun, GetFieldSchema
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,7 @@ class EditFieldInfo(foo.Operator):
             name="edit_field_info",
             label="Edit field info",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -158,8 +164,9 @@ class EditFieldValues(foo.Operator):
             label="Edit field values",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -174,9 +181,7 @@ class EditFieldValues(foo.Operator):
     def execute(self, ctx):
         path = ctx.params["path"]
         map = ctx.params["map"]
-        target = ctx.params.get("target", None)
-
-        target_view = _get_target_view(ctx, target)
+        target_view = ctx.target_view(param_name="target", require_flat=True)
 
         f = _make_parse_field_fcn(ctx, path)
 
@@ -212,42 +217,18 @@ def _make_parse_field_fcn(ctx, path):
 
 
 def _edit_field_values_inputs(ctx, inputs):
-    has_view = ctx.view != ctx.dataset.view()
-    has_selected = bool(ctx.selected)
-    default_target = None
-    if has_view or has_selected:
-        target_choices = types.RadioGroup()
-        target_choices.add_choice(
-            "DATASET",
-            label="Entire dataset",
-            description="Edit field values for the entire dataset",
-        )
-
-        if has_view:
-            target_choices.add_choice(
-                "CURRENT_VIEW",
-                label="Current view",
-                description="Edit field values for the current view",
-            )
-            default_target = "CURRENT_VIEW"
-
-        if has_selected:
-            target_choices.add_choice(
-                "SELECTED_SAMPLES",
-                label="Selected samples",
-                description="Edit field values for the selected samples",
-            )
-            default_target = "SELECTED_SAMPLES"
-
-        inputs.enum(
-            "target",
-            target_choices.values(),
-            default=default_target,
-            view=target_choices,
-        )
-
-    target = ctx.params.get("target", default_target)
-    target_view = _get_target_view(ctx, target)
+    inputs.view_target(
+        ctx,
+        name="target",
+        action_description="Edit field values for",
+        dataset_description="Edit field values for the entire dataset",
+        current_view_description="Edit field values for the current view",
+        selected_samples_description=(
+            "Edit field values for the selected samples"
+        ),
+        require_flat=True,
+    )
+    target_view = ctx.target_view(param_name="target", require_flat=True)
 
     schema = target_view.get_field_schema(flat=True)
     if target_view._has_frame_fields():
@@ -362,6 +343,7 @@ class CloneSelectedSamples(foo.Operator):
             name="clone_selected_samples",
             label="Clone selected samples",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -405,8 +387,9 @@ class CloneSampleField(foo.Operator):
             label="Clone sample field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -421,51 +404,25 @@ class CloneSampleField(foo.Operator):
     def execute(self, ctx):
         field_name = ctx.params["field_name"]
         new_field_name = ctx.params["new_field_name"]
-        target = ctx.params.get("target", None)
-
-        target_view = _get_target_view(ctx, target)
+        target_view = ctx.target_view(param_name="target", require_flat=True)
 
         target_view.clone_sample_field(field_name, new_field_name)
         ctx.trigger("reload_dataset")
 
 
 def _clone_sample_field_inputs(ctx, inputs):
-    has_view = ctx.view != ctx.dataset.view()
-    has_selected = bool(ctx.selected)
-    default_target = None
-    if has_view or has_selected:
-        target_choices = types.RadioGroup()
-        target_choices.add_choice(
-            "DATASET",
-            label="Entire dataset",
-            description="Clone sample field for the entire dataset",
-        )
-
-        if has_view:
-            target_choices.add_choice(
-                "CURRENT_VIEW",
-                label="Current view",
-                description="Clone sample field for the current view",
-            )
-            default_target = "CURRENT_VIEW"
-
-        if has_selected:
-            target_choices.add_choice(
-                "SELECTED_SAMPLES",
-                label="Selected samples",
-                description="Clone sample field for the selected samples",
-            )
-            default_target = "SELECTED_SAMPLES"
-
-        inputs.enum(
-            "target",
-            target_choices.values(),
-            default=default_target,
-            view=target_choices,
-        )
-
-    target = ctx.params.get("target", default_target)
-    target_view = _get_target_view(ctx, target)
+    inputs.view_target(
+        ctx,
+        name="target",
+        action_description="Clone sample field for",
+        dataset_description="Clone sample field for the entire dataset",
+        current_view_description="Clone sample field for the current view",
+        selected_samples_description=(
+            "Clone sample field for the selected samples"
+        ),
+        require_flat=True,
+    )
+    target_view = ctx.target_view(param_name="target", require_flat=True)
 
     schema = target_view.get_field_schema(flat=True)
     full_schema = ctx.dataset.get_field_schema(flat=True)
@@ -517,8 +474,9 @@ class CloneFrameField(foo.Operator):
             label="Clone frame field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -533,9 +491,7 @@ class CloneFrameField(foo.Operator):
     def execute(self, ctx):
         field_name = ctx.params["field_name"]
         new_field_name = ctx.params["new_field_name"]
-        target = ctx.params.get("target", None)
-
-        target_view = _get_target_view(ctx, target)
+        target_view = ctx.target_view(param_name="target", require_flat=True)
 
         target_view.clone_frame_field(field_name, new_field_name)
         ctx.trigger("reload_dataset")
@@ -551,42 +507,18 @@ def _clone_frame_field_inputs(ctx, inputs):
         prop.invalid = True
         return
 
-    has_view = ctx.view != ctx.dataset.view()
-    has_selected = bool(ctx.selected)
-    default_target = None
-    if has_view or has_selected:
-        target_choices = types.RadioGroup()
-        target_choices.add_choice(
-            "DATASET",
-            label="Entire dataset",
-            description="Clone frame field for the entire dataset",
-        )
-
-        if has_view:
-            target_choices.add_choice(
-                "CURRENT_VIEW",
-                label="Current view",
-                description="Clone frame field for the current view",
-            )
-            default_target = "CURRENT_VIEW"
-
-        if has_selected:
-            target_choices.add_choice(
-                "SELECTED_SAMPLES",
-                label="Selected samples",
-                description="Clone frame field for the selected samples",
-            )
-            default_target = "SELECTED_SAMPLES"
-
-        inputs.enum(
-            "target",
-            target_choices.values(),
-            default=default_target,
-            view=target_choices,
-        )
-
-    target = ctx.params.get("target", default_target)
-    target_view = _get_target_view(ctx, target)
+    inputs.view_target(
+        ctx,
+        name="target",
+        action_description="Clone frame field for",
+        dataset_description="Clone frame field for the entire dataset",
+        current_view_description="Clone frame field for the current view",
+        selected_samples_description=(
+            "Clone frame field for the selected samples"
+        ),
+        require_flat=True,
+    )
+    target_view = ctx.target_view(param_name="target", require_flat=True)
 
     schema = target_view.get_frame_field_schema(flat=True)
     full_schema = ctx.dataset.get_frame_field_schema(flat=True)
@@ -638,8 +570,9 @@ class RenameSampleField(foo.Operator):
             label="Rename sample field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -724,8 +657,9 @@ class RenameFrameField(foo.Operator):
             label="Rename frame field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -819,8 +753,9 @@ class ClearSampleField(foo.Operator):
             label="Clear sample field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -834,51 +769,25 @@ class ClearSampleField(foo.Operator):
 
     def execute(self, ctx):
         field_names = ctx.params["field_names"]
-        target = ctx.params.get("target", None)
-
-        target_view = _get_target_view(ctx, target)
+        target_view = ctx.target_view(param_name="target", require_flat=True)
 
         target_view.clear_sample_fields(field_names)
         ctx.trigger("reload_dataset")
 
 
 def _clear_sample_field_inputs(ctx, inputs):
-    has_view = ctx.view != ctx.dataset.view()
-    has_selected = bool(ctx.selected)
-    default_target = None
-    if has_view or has_selected:
-        target_choices = types.RadioGroup()
-        target_choices.add_choice(
-            "DATASET",
-            label="Entire dataset",
-            description="Clear sample field(s) for the entire dataset",
-        )
-
-        if has_view:
-            target_choices.add_choice(
-                "CURRENT_VIEW",
-                label="Current view",
-                description="Clear sample field(s) for the current view",
-            )
-            default_target = "CURRENT_VIEW"
-
-        if has_selected:
-            target_choices.add_choice(
-                "SELECTED_SAMPLES",
-                label="Selected samples",
-                description="Clear sample field(s) for the selected samples",
-            )
-            default_target = "SELECTED_SAMPLES"
-
-        inputs.enum(
-            "target",
-            target_choices.values(),
-            default=default_target,
-            view=target_choices,
-        )
-
-    target = ctx.params.get("target", default_target)
-    target_view = _get_target_view(ctx, target)
+    inputs.view_target(
+        ctx,
+        name="target",
+        action_description="Clear sample field(s) for",
+        dataset_description="Clear sample field(s) for the entire dataset",
+        current_view_description="Clear sample field(s) for the current view",
+        selected_samples_description=(
+            "Clear sample field(s) for the selected samples"
+        ),
+        require_flat=True,
+    )
+    target_view = ctx.target_view(param_name="target", require_flat=True)
 
     schema = target_view.get_field_schema(flat=True)
     schema.pop("id", None)
@@ -921,8 +830,9 @@ class ClearFrameField(foo.Operator):
             label="Clear frame field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -936,9 +846,7 @@ class ClearFrameField(foo.Operator):
 
     def execute(self, ctx):
         field_names = ctx.params["field_names"]
-        target = ctx.params.get("target", None)
-
-        target_view = _get_target_view(ctx, target)
+        target_view = ctx.target_view(param_name="target", require_flat=True)
 
         target_view.clear_frame_fields(field_names)
         ctx.trigger("reload_dataset")
@@ -954,42 +862,18 @@ def _clear_frame_field_inputs(ctx, inputs):
         prop.invalid = True
         return
 
-    has_view = ctx.view != ctx.dataset.view()
-    has_selected = bool(ctx.selected)
-    default_target = None
-    if has_view or has_selected:
-        target_choices = types.RadioGroup()
-        target_choices.add_choice(
-            "DATASET",
-            label="Entire dataset",
-            description="Clear frame field(s) for the entire dataset",
-        )
-
-        if has_view:
-            target_choices.add_choice(
-                "CURRENT_VIEW",
-                label="Current view",
-                description="Clear frame field(s) for the current view",
-            )
-            default_target = "CURRENT_VIEW"
-
-        if has_selected:
-            target_choices.add_choice(
-                "SELECTED_SAMPLES",
-                label="Selected samples",
-                description="Clear frame field(s) for the selected samples",
-            )
-            default_target = "SELECTED_SAMPLES"
-
-        inputs.enum(
-            "target",
-            target_choices.values(),
-            default=default_target,
-            view=target_choices,
-        )
-
-    target = ctx.params.get("target", default_target)
-    target_view = _get_target_view(ctx, target)
+    inputs.view_target(
+        ctx,
+        name="target",
+        action_description="Clear frame field(s) for",
+        dataset_description="Clear frame field(s) for the entire dataset",
+        current_view_description="Clear frame field(s) for the current view",
+        selected_samples_description=(
+            "Clear frame field(s) for the selected samples"
+        ),
+        require_flat=True,
+    )
+    target_view = ctx.target_view(param_name="target", require_flat=True)
 
     schema = target_view.get_frame_field_schema(flat=True)
     schema.pop("id", None)
@@ -1035,6 +919,7 @@ class DeleteSelectedSamples(foo.Operator):
             name="delete_selected_samples",
             label="Delete selected samples",
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -1076,6 +961,7 @@ class DeleteSelectedLabels(foo.Operator):
             name="delete_selected_labels",
             label="Delete selected labels",
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -1214,8 +1100,9 @@ class DeleteSampleField(foo.Operator):
             label="Delete sample field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -1283,8 +1170,9 @@ class DeleteFrameField(foo.Operator):
             label="Delete frame field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -1364,6 +1252,7 @@ class AddDynamicSampleFields(foo.Operator):
             name="add_dynamic_sample_fields",
             label="Add dynamic sample fields",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -1514,6 +1403,7 @@ class AddDynamicFrameFields(foo.Operator):
             name="add_dynamic_frame_fields",
             label="Add dynamic frame fields",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -1662,6 +1552,7 @@ class RemoveDynamicSampleFields(foo.Operator):
             name="remove_dynamic_sample_fields",
             label="Remove dynamic sample fields",
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -1735,6 +1626,7 @@ class RemoveDynamicFrameFields(foo.Operator):
             name="remove_dynamic_frame_fields",
             label="Remove dynamic frame fields",
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -1820,6 +1712,7 @@ class CreateIndex(foo.Operator):
             name="create_index",
             label="Create index",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -1968,6 +1861,7 @@ class DropIndex(foo.Operator):
             name="drop_index",
             label="Drop index",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -2027,8 +1921,9 @@ class CreateSummaryField(foo.Operator):
             label="Create summary field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -2227,8 +2122,9 @@ class UpdateSummaryField(foo.Operator):
             label="Update summary field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -2294,8 +2190,9 @@ class DeleteSummaryField(foo.Operator):
             label="Delete summary field",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -2347,6 +2244,7 @@ class AddGroupSlice(foo.Operator):
             name="add_group_slice",
             label="Add group slice",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -2408,8 +2306,9 @@ class RenameGroupSlice(foo.Operator):
             label="Rename group slice",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -2476,8 +2375,9 @@ class DeleteGroupSlice(foo.Operator):
             label="Delete group slice",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -2534,6 +2434,7 @@ class ListSavedViews(foo.Operator):
             name="list_saved_views",
             label="List saved views",
             unlisted=True,
+            risk_level=types.RiskLevel.LOW,
         )
 
     def execute(self, ctx):
@@ -2547,6 +2448,7 @@ class LoadSavedView(foo.Operator):
             name="load_saved_view",
             label="Load saved view",
             dynamic=True,
+            risk_level=types.RiskLevel.LOW,
         )
 
     def resolve_input(self, ctx):
@@ -2591,6 +2493,7 @@ class ReloadSavedView(foo.Operator):
             name="reload_saved_view",
             label="Reload saved view",
             dynamic=True,
+            risk_level=types.RiskLevel.LOW,
         )
 
     def resolve_placement(self, ctx):
@@ -2720,6 +2623,7 @@ class SaveView(foo.Operator):
             name="save_view",
             label="Save view",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -2792,6 +2696,7 @@ class EditSavedViewInfo(foo.Operator):
             name="edit_saved_view_info",
             label="Edit saved view info",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -2886,6 +2791,7 @@ class DeleteSavedView(foo.Operator):
             name="delete_saved_view",
             label="Delete saved view",
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -2937,6 +2843,7 @@ class ListWorkspaces(foo.Operator):
             name="list_workspaces",
             label="List workspaces",
             unlisted=True,
+            risk_level=types.RiskLevel.LOW,
         )
 
     def execute(self, ctx):
@@ -2950,6 +2857,7 @@ class LoadWorkspace(foo.Operator):
             name="load_workspace",
             label="Load workspace",
             dynamic=True,
+            risk_level=types.RiskLevel.LOW,
         )
 
     def resolve_input(self, ctx):
@@ -2994,6 +2902,7 @@ class SaveWorkspace(foo.Operator):
             name="save_workspace",
             label="Save workspace",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -3080,6 +2989,7 @@ class EditWorkspaceInfo(foo.Operator):
             name="edit_workspace_info",
             label="Edit workspace info",
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -3179,6 +3089,7 @@ class DeleteWorkspace(foo.Operator):
             name="delete_workspace",
             label="Delete workspace",
             dynamic=True,
+            risk_level=types.RiskLevel.HIGH,
         )
 
     def resolve_input(self, ctx):
@@ -3236,8 +3147,9 @@ class SyncLastModifiedAt(foo.Operator):
             label="Sync last modified at",
             allow_delegated_execution=True,
             allow_immediate_execution=True,
-            default_choice_to_delegated=False,
+            default_choice_to_delegated=True,
             dynamic=True,
+            risk_level=types.RiskLevel.MEDIUM,
         )
 
     def resolve_input(self, ctx):
@@ -3284,6 +3196,7 @@ class ListFiles(foo.Operator):
             name="list_files",
             label="List Files",
             unlisted=True,
+            risk_level=types.RiskLevel.LOW,
         )
 
     def execute(self, ctx):
@@ -3344,19 +3257,6 @@ def list_files(dirpath):
     return dirs + files
 
 
-def _get_target_view(ctx, target):
-    if target == "SELECTED_LABELS":
-        return ctx.view.select_labels(labels=ctx.selected_labels)
-
-    if target == "SELECTED_SAMPLES":
-        return ctx.view.select(ctx.selected)
-
-    if target == "DATASET":
-        return ctx.dataset
-
-    return ctx.view
-
-
 def _get_non_default_sample_fields(dataset):
     schema = dataset.get_field_schema(flat=True)
 
@@ -3400,6 +3300,7 @@ class DownloadFileOperator(foo.Operator):
             name="download_file",
             label="Download file",
             unlisted=True,
+            risk_level=types.RiskLevel.LOW,
         )
 
     def resolve_input(self, ctx):
@@ -3468,6 +3369,7 @@ def register(p):
     p.register(DownloadFileOperator)
     p.register(ConfigureScenario)
     p.register(ConfigureScenarioPlotResolver)
+    p.register(ListScenarios)
 
     # view stages
     p.register(GroupBy)
@@ -3483,3 +3385,7 @@ def register(p):
     p.register(SetActiveLabelSchemas)
     p.register(UpdateLabelSchema)
     p.register(ValidateLabelSchemas)
+
+    # dataset
+    p.register(DeleteBrainRun)
+    p.register(GetFieldSchema)

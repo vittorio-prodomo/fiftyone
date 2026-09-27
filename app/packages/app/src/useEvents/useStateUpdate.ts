@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import type { EventHandlerHook } from "./registerEvent";
 
 import { env } from "@fiftyone/utilities";
@@ -20,10 +24,10 @@ const useStateUpdate: EventHandlerHook = ({
       const stateless = env().VITE_NO_STATE;
       const path = resolveURL({
         currentPathname: router.history.location.pathname,
-        currentSearch: router.history.location.search,
+        currentSearch: router.location.search,
         nextDataset: stateless
           ? getDatasetName()
-          : (payload.state.dataset as string) ?? null,
+          : ((payload.state.dataset as string) ?? null),
         nextView: stateless
           ? getParam("view") || undefined
           : (payload.state.saved_view_slug as string),
@@ -42,7 +46,7 @@ const useStateUpdate: EventHandlerHook = ({
         router.history.push(path, state);
       }
     },
-    [readyStateRef, router, session, setReadyState]
+    [readyStateRef, router, session, setReadyState],
   );
 };
 

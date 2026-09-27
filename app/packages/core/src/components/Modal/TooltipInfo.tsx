@@ -9,6 +9,7 @@ import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { Typography } from "@mui/material";
 import { animated, useSpring } from "@react-spring/web";
+import { Orientation, Spacing, Stack } from "@voxel51/voodo";
 import React, {
   useCallback,
   useEffect,
@@ -23,9 +24,8 @@ import { useRecoilState, useRecoilValue, useSetRecoilState } from "recoil";
 import styled from "styled-components";
 import { joinStringArray } from "../Filters/utils";
 import { ContentDiv, ContentHeader } from "../utils";
-import { Orientation, Spacing, Stack } from "@voxel51/voodo";
-import { useCanAnnotateField } from "./Sidebar/Annotate/useCanAnnotateField";
 import { QuickEditEntry } from "./Sidebar/Annotate";
+import { useCanAnnotateField } from "./Sidebar/Annotate/useCanAnnotateField";
 
 const TOOLTIP_HEADER_ID = "fo-tooltip-header";
 
@@ -34,7 +34,7 @@ const TooltipDiv = animated(styled(ContentDiv)<{ $isTooltipLocked: boolean }>`
   margin-top: 0;
   left: -1000;
   top: -1000;
-  z-index: 20000;
+  z-index: 1500;
   min-width: 15rem;
   pointer-events: ${(props) => (props.$isTooltipLocked ? "auto" : "none")};
 `);
@@ -70,9 +70,9 @@ const HiddenItemsContainer = styled.div`
 `;
 
 const HiddenItemRowDiv = styled.div`
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   height: 1.5rem;
 `;
 
@@ -83,11 +83,11 @@ const Row = styled.div`
 `;
 
 const ContentItemContainer = styled.div`
+  position: relative;
   margin: 0;
   padding: 0;
   display: flex;
   align-items: center;
-  justify-content: space-between;
 `;
 
 const ContentItemDiv = styled.div`
@@ -97,11 +97,11 @@ const ContentItemDiv = styled.div`
 `;
 
 const VisibilityIconContainer = animated(styled.div`
-  width: 1.5rem;
+  position: absolute;
+  inset: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding-right: 0.5rem;
+  justify-content: flex-end;
 `);
 
 const ContentValue = styled.div`
@@ -171,7 +171,7 @@ const LABEL_CHANGE_EVENT_NAME = "fo-hide-label-change";
 
 const getHiddenLabels = (datasetName: string, labelName: string) => {
   const hiddenLabels = localStorage.getItem(
-    getHiddenLabelsKey(datasetName, labelName)
+    getHiddenLabelsKey(datasetName, labelName),
   );
   const hiddenLabelsArray = hiddenLabels ? hiddenLabels.split(",") : [];
   const sortedHiddenLabels = hiddenLabelsArray.sort();
@@ -208,7 +208,7 @@ export const ContentItem = ({
     hiddenLabels.add(name);
     localStorage.setItem(
       getHiddenLabelsKey(datasetName, field),
-      [...hiddenLabels].join(",")
+      [...hiddenLabels].join(","),
     );
     setIsThisItemVisible(false);
     dispatchHideLabelChangeEvent();
@@ -244,7 +244,7 @@ export const ContentItem = ({
       }}
     >
       <ContentItemDiv style={style}>
-        <ContentValue>
+        <ContentValue data-cy={`attribute-${name}`}>
           {(() => {
             switch (typeof value) {
               case "number":
@@ -298,13 +298,13 @@ const TagInfo = ({ tags }: { tags: string[] }) => {
 
 export const TooltipInfo = React.memo(() => {
   const [isTooltipLocked, setIsTooltipLocked] = useRecoilState(
-    fos.isTooltipLocked
+    fos.isTooltipLocked,
   );
   const detail = useRecoilValue(fos.tooltipDetail);
   const coords = useRecoilValue(fos.tooltipCoordinates);
   const position = useMemo(
     () => (detail ? coords : { top: -1000, left: -1000, bottom: "unset" }),
-    [coords, detail]
+    [coords, detail],
   );
 
   const coordsProps = useSpring({
@@ -363,19 +363,22 @@ export const TooltipInfo = React.memo(() => {
 
     return (
       <TooltipDiv
+        data-cy={`sample-canvas-tooltip-${
+          isTooltipLocked ? "locked" : "unlocked"
+        }`}
         $isTooltipLocked={isTooltipLocked}
         style={{ ...coordsProps, ...showProps, position: "fixed" }}
         ref={ref}
       >
         <Header title={detail.field} labelId={detail.label.id} />
         <Border color={detail.color} id={detail.label.id} />
-        <TooltipContentDiv>
+        <TooltipContentDiv data-cy="sample-canvas-tooltip-content">
           {detail.label.tags && detail.label.tags.length > 0 && (
             <TagInfo key={"tags"} tags={detail.label?.tags} />
           )}
           <Component key={"attrs"} detail={detail} />
           {isTooltipLocked && (
-            <HiddenItemsContainer>
+            <HiddenItemsContainer data-cy={"hidden-attributes"}>
               <HiddenItems key={detail.field} field={detail.field} />
             </HiddenItemsContainer>
           )}
@@ -393,10 +396,8 @@ export const TooltipInfo = React.memo(() => {
   }
 
   return ReactDOM.createPortal(
-    <div>
-      <Draggable handle={"#" + TOOLTIP_HEADER_ID}>{tooltipDiv}</Draggable>
-    </div>,
-    document.body
+    <Draggable handle={"#" + TOOLTIP_HEADER_ID}>{tooltipDiv}</Draggable>,
+    document.body,
   );
 });
 
@@ -405,7 +406,7 @@ const HiddenItems = ({ field }: { field: string }) => {
   const [shouldShowHidden, setShouldShowHidden] = useState(false);
 
   const [currentHiddenLabels, setCurrentHiddenLabels] = useState(
-    getHiddenLabels(datasetName, field)
+    getHiddenLabels(datasetName, field),
   );
 
   const refreshHiddenLabels = useCallback(() => {
@@ -481,7 +482,7 @@ const HiddenItemRow = ({
     hiddenLabels.delete(name);
     localStorage.setItem(
       getHiddenLabelsKey(datasetName, field),
-      [...hiddenLabels].join(",")
+      [...hiddenLabels].join(","),
     );
     refreshHiddenLabels();
     window.dispatchEvent(new CustomEvent(LABEL_CHANGE_EVENT_NAME));
@@ -511,7 +512,7 @@ const HiddenItemRow = ({
 
 const Header = ({ title, labelId }: { title: string; labelId: string }) => {
   const [isTooltipLocked, setIsTooltipLocked] = useRecoilState(
-    fos.isTooltipLocked
+    fos.isTooltipLocked,
   );
   const setTooltipDetail = useSetRecoilState(fos.tooltipDetail);
   const canAnnotateField = useCanAnnotateField(title);
@@ -528,7 +529,12 @@ const Header = ({ title, labelId }: { title: string; labelId: string }) => {
       key="header"
       id={TOOLTIP_HEADER_ID}
     >
-      <span style={{ fontSize: "0.8rem" }}>{title}</span>
+      <span
+        data-cy="sample-canvas-tooltip-title"
+        style={{ fontSize: "0.8rem" }}
+      >
+        {title}
+      </span>
       {isTooltipLocked ? (
         <Stack orientation={Orientation.Row} spacing={Spacing.Xs}>
           <QuickEditEntry
@@ -609,7 +615,7 @@ const useTarget = (field, target) => {
 
 const AttrInfo = ({ label, field, labelType, children = null }) => {
   let entries = Object.entries(label).filter(
-    ([k, v]) => "tags" !== k && !k.startsWith("_")
+    ([k]) => "tags" !== k && !k.startsWith("_"),
   );
   if (!entries || !entries.length) {
     return null;
@@ -621,8 +627,8 @@ const AttrInfo = ({ label, field, labelType, children = null }) => {
   const other = entries.filter(
     ([name]) =>
       ![...defaultLabels, ...HIDDEN_LABELS[labelType], "attributes"].includes(
-        name
-      )
+        name,
+      ),
   );
   const mapper = ([name, value]) => (
     <ContentItem key={name} name={name} field={field} value={value} />
@@ -631,7 +637,7 @@ const AttrInfo = ({ label, field, labelType, children = null }) => {
   const attributes =
     typeof label.attributes === "object"
       ? Object.entries(
-          label.attributes as { [key: string]: { value: string | number } }
+          label.attributes as { [key: string]: { value: string | number } },
         ).map<[string, string | number]>(([k, v]) => [
           "attributes." + k,
           v.value,
@@ -645,7 +651,7 @@ const AttrInfo = ({ label, field, labelType, children = null }) => {
           ([k, v]) =>
             typeof v === "string" &&
             v.length > 0 &&
-            (k === "_id" || !k.startsWith("_"))
+            (k === "_id" || !k.startsWith("_")),
         )
         .map(([k, v]) => ["instance " + (k === "_id" ? "id" : k), v])
     : null;
@@ -716,11 +722,11 @@ const KeypointInfo = ({ detail }) => {
           field={detail.field}
           label={Object.fromEntries(
             detail.point.attributes
-              .filter(([x, y]) => x !== "points")
+              .filter(([x]) => x !== "points")
               .map(([k, v]) => [
                 `${k === "label" ? "skeleton" : k}[${detail.point.index}]`,
                 v,
-              ])
+              ]),
           )}
           labelType={detail.type}
         />

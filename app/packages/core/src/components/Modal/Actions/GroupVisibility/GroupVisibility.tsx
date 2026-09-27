@@ -1,12 +1,12 @@
 import { PopoutSectionTitle } from "@fiftyone/components";
 import * as fos from "@fiftyone/state";
 import type { MutableRefObject, ReactNode } from "react";
-import React, { useMemo } from "react";
+import { useMemo } from "react";
 import { useRecoilState, useRecoilValue } from "recoil";
 import Popout from "../../../Actions/Popout";
 import Checkbox from "../../../Common/Checkbox";
 
-export const TITLE = "Toggle media";
+export const TITLE = "Toggle renderer configuration";
 
 export default ({
   modal,
@@ -15,20 +15,18 @@ export default ({
   modal: boolean;
   anchorRef: MutableRefObject<HTMLDivElement | null>;
 }) => {
-  const [isSlotVisible, setIsSlotVisible] = useRecoilState(
-    fos.groupMedia3dVisibleSetting
-  );
-  const threeDSliceExists = useRecoilValue(fos.has3dSlice);
+  const threeDSliceExists = fos.useHas3dSlice();
+  const isSlotVisible = fos.useIs3dVisibleSetting();
+  const actions = fos.useRenderConfig3dActions();
   const [isCarouselVisible, setIsCarouselVisible] = useRecoilState(
-    fos.groupMediaIsCarouselVisibleSetting
+    fos.groupMediaIsCarouselVisibleSetting,
   );
-  const [isMainVisible, setIsMainVisible] = useRecoilState(
-    fos.groupMediaIsMain2DViewerVisibleSetting
-  );
+  const isMainVisible = fos.useIsGroupMain2dViewerVisibleSetting();
   const isNestedDynamicGroup = useRecoilValue(fos.isNestedDynamicGroup);
   const shouldRenderImaVid = useRecoilValue(fos.shouldRenderImaVidLooker(true));
   const dynamicGroupsViewMode = useRecoilValue(fos.dynamicGroupsViewMode(true));
   const hasGroupSlices = useRecoilValue(fos.hasGroupSlices);
+  const isAnnotateMode = fos.useModalMode() === fos.ModalMode.ANNOTATE;
 
   const isSequentialAccessAllowed =
     isNestedDynamicGroup ||
@@ -49,10 +47,28 @@ export default ({
           muted={
             isImavidInNestedGroup || (!isMainVisible && !isCarouselVisible)
           }
-          setValue={(value) => setIsSlotVisible(value)}
-        />
+          setValue={(value) => actions.setVisible(value)}
+        />,
       );
     }
+
+    // Mute the 2D Viewer checkbox when annotate mode controls visibility for a 3D slice
+    const isAnnotating3d = isAnnotateMode && isSlotVisible && threeDSliceExists;
+
+    toReturn.push(
+      <Checkbox
+        key="checkbox-viewer"
+        name={"2D Viewer"}
+        value={isMainVisible}
+        muted={
+          isAnnotating3d ||
+          isImavidInNestedGroup ||
+          (!isCarouselVisible && toReturn.length === 0) ||
+          (!(isSlotVisible && threeDSliceExists) && !isCarouselVisible)
+        }
+        setValue={(value) => actions.setMainViewerVisible(value)}
+      />,
+    );
 
     if (isSequentialAccessAllowed) {
       toReturn.push(
@@ -65,23 +81,9 @@ export default ({
             (!(isSlotVisible && threeDSliceExists) && !isMainVisible)
           }
           setValue={(value) => setIsCarouselVisible(value)}
-        />
+        />,
       );
     }
-
-    toReturn.push(
-      <Checkbox
-        key="checkbox-viewer"
-        name={"Viewer"}
-        value={isMainVisible}
-        muted={
-          isImavidInNestedGroup ||
-          toReturn.length === 0 ||
-          (!(isSlotVisible && threeDSliceExists) && !isCarouselVisible)
-        }
-        setValue={(value) => setIsMainVisible(value)}
-      />
-    );
 
     return toReturn;
   }, [
@@ -90,10 +92,10 @@ export default ({
     isCarouselVisible,
     isMainVisible,
     isSlotVisible,
-    setIsMainVisible,
     isImavidInNestedGroup,
     setIsCarouselVisible,
-    setIsSlotVisible,
+    isAnnotateMode,
+    actions,
   ]);
 
   return (

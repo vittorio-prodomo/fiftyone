@@ -5,6 +5,9 @@ Sphinx custom directives.
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
+import posixpath
+
 from docutils.parsers.rst import Directive, directives
 from docutils.statemachine import StringList
 from docutils import nodes
@@ -319,33 +322,28 @@ class CustomImageLinkDirective(Directive):
         "image_link": directives.unchanged,
         "image_src": directives.unchanged,
         "image_title": directives.unchanged,
+        "class": directives.unchanged,
     }
 
     def run(self):
         image_link = self.options.get("image_link", "")
         image_src = self.options.get("image_src", "")
         image_title = self.options.get("image_title", "")
+        css_class = self.options.get("class", "")
 
-        callout_rst = _CUSTOM_IMAGE_LINK_TEMPLATE.format(
+        html = _CUSTOM_IMAGE_LINK_TEMPLATE.format(
             image_link=image_link,
             image_src=image_src,
             image_title=image_title,
+            css_class=(' class="' + css_class + '"') if css_class else "",
         )
 
-        image_list = StringList(callout_rst.split("\n"))
-        image = nodes.paragraph()
-        self.state.nested_parse(image_list, self.content_offset, image)
-        return [image]
+        return [nodes.raw("", html, format="html")]
 
 
-_CUSTOM_IMAGE_LINK_TEMPLATE = """
-.. raw:: html
-
-    <div>
-        <a href="{image_link}" title="{image_title}">
-          <img src="{image_src}" alt="{image_title}"/>
-        </a>
-    </div>
+_CUSTOM_IMAGE_LINK_TEMPLATE = """<a href="{image_link}" title="{image_title}"{css_class}>
+  <img src="{image_src}" alt="{image_title}"/>
+</a>
 """
 
 
@@ -418,6 +416,159 @@ _CUSTOM_ANIMATED_CTA_TEMPLATE = """
                 </svg>  
             </div>
             <div class="text">{button_text}</div>
+        </a>
+    </div>
+"""
+
+
+class CustomUseCaseCardDirective(Directive):
+    """A custom use-case card with image, title, description, and link.
+
+    Renders a responsive card for industry use-case sections on the landing page.
+
+    Example usage::
+
+        .. customusecasecard::
+            :title: Medical Imaging
+            :description: Explore medical imaging workflows with DICOM and CT scans.
+            :link: getting_started/medical_imaging/index.html
+            :image: https://cdn.voxel51.com/all_patients_ct.webp
+    """
+
+    option_spec = {
+        "title": directives.unchanged,
+        "description": directives.unchanged,
+        "link": directives.unchanged,
+        "image": directives.unchanged,
+    }
+
+    def run(self):
+        title = self.options.get("title", "")
+        description = self.options.get("description", "")
+        link = self.options.get("link", "")
+        image = self.options.get("image", "")
+
+        html = _CUSTOM_USE_CASE_CARD_TEMPLATE.format(
+            title=title,
+            description=description,
+            link=link,
+            image=image,
+        )
+
+        return [nodes.raw("", html, format="html")]
+
+
+_CUSTOM_USE_CASE_CARD_TEMPLATE = """
+    <div class="col-md-4 col-sm-6 use-case-card-container">
+        <a href="{link}" class="use-case-card">
+            <div class="use-case-card-image">
+                <img src="{image}" alt="{title}" loading="lazy" decoding="async" />
+            </div>
+            <div class="use-case-card-body">
+                <h5>{title}</h5>
+                <p>{description}</p>
+            </div>
+        </a>
+    </div>
+"""
+
+
+class CustomAvailableInDirective(Directive):
+    """Shows which FiftyOne editions a feature is available in and the
+    version each was introduced in, linking to the corresponding entries
+    in the release notes.
+
+    Omit `oss_version` for a feature that is exclusive to FiftyOne
+    Enterprise; a "Book a Demo" CTA is rendered in its place. Omit
+    `enterprise_version` for a feature that isn't available in Enterprise.
+
+    Example usage::
+
+        .. customavailablein::
+            :oss_version: 1.13.0
+            :enterprise_version: 2.16.0
+    """
+
+    option_spec = {
+        "oss_version": directives.unchanged,
+        "enterprise_version": directives.unchanged,
+    }
+
+    def run(self):
+        oss_version = self.options.get("oss_version", "").strip()
+        enterprise_version = self.options.get("enterprise_version", "").strip()
+
+        if not oss_version and not enterprise_version:
+            raise self.error(
+                "customavailablein requires oss_version and/or "
+                "enterprise_version"
+            )
+
+        env = self.state.document.settings.env
+        prefix = posixpath.relpath(
+            "release-notes", posixpath.dirname(env.docname)
+        )
+
+        pills = []
+        versions = []
+
+        if oss_version:
+            pills.append(
+                '<span class="available-in-pill available-in-pill--oss">'
+                "Open Source</span>"
+            )
+            versions.append(
+                '<a href="%s.html#fiftyone-%s">FiftyOne %s</a>'
+                % (prefix, oss_version.replace(".", "-"), oss_version)
+            )
+
+        if enterprise_version:
+            pills.append(
+                '<span class="available-in-pill available-in-pill--enterprise">'
+                "Enterprise</span>"
+            )
+            versions.append(
+                '<a href="%s.html#fiftyone-enterprise-%s">'
+                "FiftyOne Enterprise %s</a>"
+                % (
+                    prefix,
+                    enterprise_version.replace(".", "-"),
+                    enterprise_version,
+                )
+            )
+
+        cta = (
+            _AVAILABLE_IN_CTA_TEMPLATE
+            if enterprise_version and not oss_version
+            else ""
+        )
+
+        html = _AVAILABLE_IN_TEMPLATE.format(
+            pills="".join(pills),
+            versions=" &middot; ".join(versions),
+            cta=cta,
+        )
+
+        return [nodes.raw("", html, format="html")]
+
+
+_AVAILABLE_IN_TEMPLATE = """
+<div class="available-in">
+    <div class="available-in-row">
+        <span class="available-in-label">Available in:</span>
+        {pills}
+    </div>
+    <div class="available-in-row">
+        <span class="available-in-versions">Introduced in {versions}</span>
+    </div>
+    {cta}
+</div>
+"""
+
+_AVAILABLE_IN_CTA_TEMPLATE = """
+    <div class="available-in-cta">
+        <a href="https://voxel51.com/book-a-demo" class="available-in-cta-link" rel="noopener noreferrer" target="_blank">
+            Schedule a demo to get started with FiftyOne Enterprise
         </a>
     </div>
 """

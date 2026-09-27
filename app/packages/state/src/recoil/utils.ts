@@ -1,4 +1,9 @@
-import { Sample } from "@fiftyone/looker";
+import type { Sample } from "@fiftyone/looker";
+import type {
+  SelectionIconStyle,
+  SelectionStyle,
+  SelectionType,
+} from "./types";
 import {
   EMBEDDED_DOCUMENT_FIELD,
   LABELS,
@@ -11,7 +16,8 @@ import {
   getFetchParameters,
 } from "@fiftyone/utilities";
 import { RecoilValue, useRecoilValue } from "recoil";
-import { Nullable } from "vitest";
+
+type Nullable<T> = T | null | undefined;
 
 export const getSampleSrc = (url: string) => {
   if (determinePathType(url) === PathType.URL) {
@@ -27,9 +33,9 @@ export const getSampleSrc = (url: string) => {
 export const mapSampleResponse = <
   T extends Nullable<{
     readonly sample?: Sample;
-  }>
+  }>,
 >(
-  data: T
+  data: T,
 ): T => {
   // This value may be a string that needs to be deserialized
   // Only occurs after calling useUpdateSample for 3D sample
@@ -50,7 +56,7 @@ export const fieldsMatcher = (
 
   matcher: (field: StrictField) => boolean,
   present?: Set<string>,
-  prefix = ""
+  prefix = "",
 ): string[] => {
   return fields
     .filter((field) => matcher(field))
@@ -149,8 +155,8 @@ export const getEmbeddedLabelFields = (fields: StrictField[], prefix = "") =>
         parent.fields || [],
         labelsMatcher(parent),
         undefined,
-        `${prefix}${parent.name}.`
-      )
+        `${prefix}${parent.name}.`,
+      ),
     )
     .flat();
 
@@ -164,4 +170,23 @@ export function useAssertedRecoilValue<T>(recoilValue: RecoilValue<T>) {
   }
 
   return value;
+}
+
+export function resolveSelectionIcon(
+  selectedSamples: Map<string, SelectionType>,
+  style: SelectionStyle,
+  sampleId: string,
+  isSelected: boolean,
+): {
+  selectionType: SelectionType | null;
+  selectionIcon: SelectionIconStyle | null;
+} {
+  if (!isSelected) {
+    return { selectionType: null, selectionIcon: null };
+  }
+  const selectionType: SelectionType =
+    selectedSamples.get(sampleId) || "default";
+  const selectionIcon =
+    selectionType === "alt" ? style.alt || style.default : style.default;
+  return { selectionType, selectionIcon };
 }

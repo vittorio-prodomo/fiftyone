@@ -5,6 +5,10 @@ FiftyOne Command-Line Interface (CLI)
 
 .. default-role:: code
 
+.. meta::
+    :description: Reference for the fiftyone command-line interface,
+        including dataset management, App control, and config commands.
+
 Installing FiftyOne automatically installs `fiftyone`, a command-line interface
 (CLI) for interacting with FiftyOne. This utility provides access to many
 useful features, including creating and inspecting datasets, visualizing
@@ -18,13 +22,13 @@ Quickstart
 
 To see the available top-level commands, type:
 
-.. code-block:: text
+.. code-block:: shell
 
     fiftyone --help
 
 You can learn more about any available subcommand via:
 
-.. code-block:: text
+.. code-block:: shell
 
     fiftyone <command> --help
 
@@ -64,7 +68,7 @@ The FiftyOne command-line interface.
 .. code-block:: text
 
     fiftyone [-h] [-v] [--all-help]
-             {quickstart,annotation,brain,evaluation,app,config,constants,convert,datasets,migrate,operators,delegated,plugins,utils,zoo,labs}
+             {quickstart,annotation,brain,evaluation,app,config,constants,convert,datasets,migrate,operators,skills,delegated,plugins,utils,zoo,labs}
              ...
 
 **Arguments**
@@ -77,7 +81,8 @@ The FiftyOne command-line interface.
       --all-help            show help recursively and exit
 
     available commands:
-      {quickstart,annotation,brain,evaluation,app,config,constants,convert,datasets,migrate,operators,delegated,plugins,utils,zoo,labs}
+      {quickstart,annotation,brain,evaluation,app,config,constants,convert,datasets,migrate,operators,skills,delegated,plugins,utils,zoo,labs}
+
         quickstart          Launch a FiftyOne quickstart.
         annotation          Tools for working with the FiftyOne annotation API.
         brain               Tools for working with the FiftyOne Brain.
@@ -88,7 +93,8 @@ The FiftyOne command-line interface.
         convert             Convert datasets on disk between supported formats.
         datasets            Tools for working with FiftyOne datasets.
         migrate             Tools for migrating the FiftyOne database.
-        operators           Tools for working with FiftyOne operators.
+        operators           Tools for working with FiftyOne operators and panels.
+        skills              Tools for working with FiftyOne skills.
         delegated           Tools for working with FiftyOne delegated operations.
         plugins             Tools for working with FiftyOne plugins.
         utils               FiftyOne utilities.
@@ -99,6 +105,10 @@ The FiftyOne command-line interface.
 
 FiftyOne quickstart
 -------------------
+
+.. customavailablein::
+    :oss_version: 0.5.2
+    :enterprise_version: 1.0
 
 Launch a FiftyOne quickstart.
 
@@ -403,6 +413,10 @@ Print information about FiftyOne datasets.
 
 Print dataset stats
 ~~~~~~~~~~~~~~~~~~~
+
+.. customavailablein::
+    :oss_version: 0.7.4
+    :enterprise_version: 1.0
 
 Print stats about FiftyOne datasets on disk.
 
@@ -922,6 +936,81 @@ Prints information about operators and panels that are installed locally.
     # Prints information about an operator or panel
     fiftyone operators info <uri>
 
+.. _cli-fiftyone-skills:
+
+FiftyOne skills
+------------------
+
+Tools for working with FiftyOne skills.
+
+.. code-block:: text
+
+    fiftyone skills [-h] [--all-help] {list} ...
+
+**Arguments**
+
+.. code-block:: text
+
+    optional arguments:
+      -h, --help   show this help message and exit
+      --all-help   show help recursively and exit
+
+    available commands:
+      {list}
+        list      List skills provided by installed plugins.
+
+.. _cli-fiftyone-skills-list:
+
+List skills
+~~~~~~~~~~~
+
+List skills provided by installed plugins.
+
+.. code-block:: text
+
+    fiftyone skills list [-h] [-p PLUGIN [PLUGIN ...]] [-c CATEGORY [CATEGORY ...]] [-e] [-d] [-n]
+
+**Arguments**
+
+.. code-block:: text
+
+    optional arguments:
+      -h, --help            show this help message and exit
+      -p PLUGIN [PLUGIN ...], --plugin PLUGIN [PLUGIN ...]
+                            only show skills from this plugin(s)
+      -c CATEGORY [CATEGORY ...], --category CATEGORY [CATEGORY ...]
+                            only show skills in this category(s)
+      -e, --enabled         only show skills from enabled plugins
+      -d, --disabled        only show skills from disabled plugins
+      -n, --names-only      only show names
+
+**Examples**
+
+.. code-block:: shell
+
+    # List all available skills
+    fiftyone skills list
+
+.. code-block:: shell
+
+    # List skills from a specific plugin
+    fiftyone skills list --plugin @voxel51/my-plugin
+
+.. code-block:: shell
+
+    # List skills in a specific category
+    fiftyone skills list --category data-ingestion
+
+.. code-block:: shell
+
+    # List enabled skills
+    fiftyone skills list --enabled
+
+.. code-block:: shell
+
+    # List skill names only
+    fiftyone skills list --names-only
+
 .. _cli-fiftyone-delegated:
 
 FiftyOne delegated operations
@@ -1236,7 +1325,7 @@ List plugins that are installed locally.
 
 .. code-block:: text
 
-    fiftyone plugins list [-h] [-g PATT] [-e] [-d] [-b] [-c] [-n]
+    fiftyone plugins list [-h] [-g PATT] [-t TAGS [TAGS ...]] [-e] [-d] [-b] [-c] [-n]
 
 **Arguments**
 
@@ -1246,6 +1335,8 @@ List plugins that are installed locally.
       -h, --help            show this help message and exit
       -g PATT, --glob-patt PATT
                             only show plugins whose name matches the glob pattern
+      -t TAGS [TAGS ...], --tags TAGS [TAGS ...]
+                            only show plugins with the specified tag(s)
       -e, --enabled         only show enabled plugins
       -d, --disabled        only show disabled plugins
       -b, --builtins-only   only show builtin plugins
@@ -1263,6 +1354,11 @@ List plugins that are installed locally.
 
     # List plugins whose name matches the given glob pattern
     fiftyone plugins list --glob-patt '@voxel51/*'
+
+.. code-block:: shell
+
+    # List plugins with the given tag
+    fiftyone plugins list --tags <tag>
 
 .. code-block:: shell
 
@@ -1503,7 +1599,7 @@ Creates or initializes a plugin.
 
 **Examples**
 
-.. code-block:: text
+.. code-block:: shell
 
     # Initialize a new plugin
     fiftyone plugins create <name>
@@ -2109,6 +2205,10 @@ Tools for working with the FiftyOne App.
 App Config
 ~~~~~~~~~~
 
+.. customavailablein::
+    :oss_version: 0.7.2
+    :enterprise_version: 1.0
+
 Tools for working with your FiftyOne App config.
 
 .. code-block:: text
@@ -2566,7 +2666,7 @@ List datasets in the FiftyOne Dataset Zoo.
 
 .. code-block:: text
 
-    fiftyone zoo datasets list [-h] [-n] [-d] [-s SOURCE] [-t TAGS] [-l LICENSE]
+    fiftyone zoo datasets list [-h] [-n] [-d] [-s SOURCE] [-t TAGS [TAGS ...]] [-l LICENSE [LICENSE ...]]
 
 **Arguments**
 
@@ -2579,10 +2679,10 @@ List datasets in the FiftyOne Dataset Zoo.
                             only show datasets that have been downloaded
       -s SOURCE, --source SOURCE
                             only show datasets available from the specified source
-      -t TAGS, --tags TAGS  only show datasets with the specified tag or list,of,tags
-      -l LICENSE, --license LICENSE
-                            only show datasets with the specified license or
-                            any of the list,of,licenses
+      -t TAGS [TAGS ...], --tags TAGS [TAGS ...]
+                            only show datasets with the specified tag(s)
+      -l LICENSE [LICENSE ...], --license LICENSE [LICENSE ...]
+                            only show datasets distributed under the specified license(s)
 
 **Examples**
 
@@ -2878,6 +2978,10 @@ Deletes the local copy of the zoo dataset on disk.
 FiftyOne Model Zoo
 ------------------
 
+.. customavailablein::
+    :oss_version: 0.7.0
+    :enterprise_version: 1.0
+
 Tools for working with the FiftyOne Model Zoo.
 
 .. code-block:: text
@@ -2917,7 +3021,7 @@ List models in the FiftyOne Model Zoo.
 
 .. code-block:: text
 
-    fiftyone zoo models list [-h] [-n] [-d] [-t TAGS] [-s SOURCE] [-l LICENSE]
+    fiftyone zoo models list [-h] [-n] [-d] [-t TAGS [TAGS ...]] [-s SOURCE] [-l LICENSE [LICENSE ...]]
 
 **Arguments**
 
@@ -2928,12 +3032,12 @@ List models in the FiftyOne Model Zoo.
       -n, --names-only      only show model names
       -d, --downloaded-only
                             only show models that have been downloaded
-      -t TAGS, --tags TAGS  only show models with the specified tag or list,of,tags
+      -t TAGS [TAGS ...], --tags TAGS [TAGS ...]
+                            only show models with the specified tag(s)
       -s SOURCE, --source SOURCE
                             only show models available from the specified remote source
-      -l LICENSE, --license LICENSE
-                            only show models with the specified license or any
-                            of the list,of,licenses
+      -l LICENSE [LICENSE ...], --license LICENSE [LICENSE ...]
+                            only show models distributed under the specified license(s)
 
 **Examples**
 
@@ -3125,6 +3229,10 @@ following:
 
 Apply zoo models to datasets
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. customavailablein::
+    :oss_version: 0.7.0
+    :enterprise_version: 1.0
 
 Apply zoo models to datasets.
 

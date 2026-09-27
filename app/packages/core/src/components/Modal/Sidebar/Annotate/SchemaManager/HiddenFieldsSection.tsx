@@ -134,7 +134,7 @@ const HiddenFieldsSection = () => {
           } as ListItemProps,
         };
       }),
-    [fields, fieldTypes, fieldAttrCounts, fieldHasSchemaStates]
+    [fields, fieldTypes, fieldAttrCounts, fieldHasSchemaStates],
   );
 
   const handleSelected = useCallback(
@@ -142,7 +142,7 @@ const HiddenFieldsSection = () => {
       setSelected(new Set(selectedIds));
       setActiveSelected(new Set());
     },
-    [setActiveSelected, setSelected]
+    [setActiveSelected, setSelected],
   );
 
   const selectedList = useMemo(() => Array.from(selected), [selected]);
@@ -174,7 +174,7 @@ const HiddenFieldsSection = () => {
         <Tooltip
           content={
             <Text>
-              Fields currently hidden and not available for dataset annotation
+              Fields currently hidden and not available in the "Annotate" tab
             </Text>
           }
           anchor={Anchor.Top}

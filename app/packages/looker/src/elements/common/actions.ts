@@ -6,10 +6,8 @@ import { dispatchTimelineSetFrameNumberEvent } from "@fiftyone/playback";
 import { SCALE_FACTOR } from "../../constants";
 import { ImaVidFramesController } from "../../lookers/imavid/controller";
 import {
-  BaseState,
   Control,
   ControlEventKeyType,
-  ControlMap,
   ImaVidConfig,
   ImaVidState,
   VideoState,
@@ -18,21 +16,13 @@ import { clampScale } from "../../util";
 import { getFrameNumber } from "../util";
 
 import { isHoveringAnyLabelWithInstanceConfig } from "@fiftyone/state/src/jotai";
+import {
+  readActions,
+  json,
+  resetZoom,
+  selectSample,
+} from "../../shared/actions";
 import { dispatchTooltipEvent } from "./util";
-
-const readActions = <State extends BaseState>(
-  actions: ControlMap<State>
-): ControlMap<State> => {
-  return Object.fromEntries(
-    Object.entries(actions).reduce((acc, [_, v]) => {
-      if (Array.isArray(v.eventKeys)) {
-        return [...acc, ...v.eventKeys.map((key) => [key, v])];
-      }
-
-      return [...acc, [v.eventKeys || v.shortcut, v]];
-    }, [])
-  );
-};
 
 const escape: Control = {
   title: "Escape context",
@@ -40,7 +30,7 @@ const escape: Control = {
   eventKeys: "Escape",
   detail: "Escape the current context",
   alwaysHandle: true,
-  action: (update, dispatchEvent, eventKey) => {
+  action: (update, dispatchEvent) => {
     update(
       ({
         hasDefaultZoom,
@@ -75,7 +65,7 @@ const escape: Control = {
 
         dispatchEvent("close");
         return {};
-      }
+      },
     );
   },
 };
@@ -128,7 +118,7 @@ export const toggleOverlays: Control = {
 
         return { options: { showOverlays: false } };
       },
-      ({ config: { thumbnail }, options: { showOverlays } }) => {
+      ({ config: { thumbnail } }) => {
         if (thumbnail) {
           return;
         }
@@ -138,18 +128,18 @@ export const toggleOverlays: Control = {
           dispatchEvent("showOverlays", false);
           dispatchEvent("tooltip", null);
         }
-      }
+      },
     );
   },
   afterAction: (update, dispatchEvent) => {
     update(
       ({ config: { thumbnail } }) =>
         thumbnail ? {} : { options: { showOverlays: true } },
-      ({ config: { thumbnail }, options: { showOverlays } }) => {
+      ({ config: { thumbnail } }) => {
         if (!thumbnail) {
           dispatchEvent("showOverlays", true);
         }
-      }
+      },
     );
   },
 };
@@ -169,7 +159,7 @@ export const rotatePrevious: Control = {
       },
       (state, overlays) => {
         dispatchTooltipEvent(dispatchEvent)(state, overlays);
-      }
+      },
     ),
 };
 
@@ -190,7 +180,7 @@ export const rotateNext: Control = {
       },
       (state, overlays) => {
         dispatchTooltipEvent(dispatchEvent)(state, overlays);
-      }
+      },
     ),
 };
 
@@ -200,7 +190,7 @@ export const help: Control = {
   shortcut: "?",
   detail: "Display this help window",
   action: (update, dispatchEvent) => {
-    update(({ showHelp, SHORTCUTS, config: { thumbnail } }) => {
+    update(({ SHORTCUTS, config: { thumbnail } }) => {
       if (thumbnail) {
         return {};
       }
@@ -239,13 +229,13 @@ export const zoomIn: Control = {
           [ww, wh],
           dimensions,
           scale * SCALE_FACTOR,
-          zoomPad
+          zoomPad,
         );
         return {
           scale: newScale,
           pan: [x - xs * newScale, y - ys * newScale],
         };
-      }
+      },
     );
   },
 };
@@ -274,13 +264,13 @@ export const zoomOut: Control = {
           [ww, wh],
           dimensions,
           scale / SCALE_FACTOR,
-          zoomPad
+          zoomPad,
         );
         return {
           scale: newScale,
           pan: [x - xs * newScale, y - ys * newScale],
         };
-      }
+      },
     );
   },
 };
@@ -291,15 +281,6 @@ export const cropToContent: Control = {
   detail: "Crop on visible labels",
   action: (update) => {
     update(({ disableOverlays }) => ({ zoomToContent: !disableOverlays }));
-  },
-};
-
-export const resetZoom: Control = {
-  title: "Reset zoom",
-  shortcut: "r",
-  detail: "Reset zoom to default",
-  action: (update) => {
-    update({ setZoom: true });
   },
 };
 
@@ -324,7 +305,7 @@ export const settings: Control = {
             showOptions: true,
           };
         }
-      }
+      },
     );
   },
 };
@@ -352,28 +333,11 @@ export const controlsToggle: Control = {
   },
 };
 
-export const json: Control = {
-  title: "JSON",
-  shortcut: "j",
-  detail: "View JSON",
-  action: (update, dispatchEvent) => {
-    dispatchEvent("panels", { showJSON: "toggle" });
-  },
-};
-
-export const selectSample: Control = {
-  title: "Select or Deselect Sample",
-  shortcut: "x",
-  eventKeys: null,
-  detail: "Grid → Control + Click",
-  action: () => null,
-};
-
 export const downloadMedia: Control = {
   title: "Download",
   shortcut: "d",
   detail: "Download the source media file",
-  action: (update, dispatchEvent) => {
+  action: (_update, dispatchEvent) => {
     dispatchEvent("download");
   },
 };
@@ -426,7 +390,7 @@ export const nextFrame: Control<VideoState> = {
           frameNumber: Math.min(end, frameNumber + 1),
         };
       },
-      (state, overlays) => dispatchTooltipEvent(dispatchEvent)(state, overlays)
+      (state, overlays) => dispatchTooltipEvent(dispatchEvent)(state, overlays),
     );
   },
 };
@@ -464,11 +428,11 @@ export const previousFrame: Control<VideoState> = {
         return {
           frameNumber: Math.max(
             lockedToSupport ? support[0] : 1,
-            frameNumber - 1
+            frameNumber - 1,
           ),
         };
       },
-      (state, overlays) => dispatchTooltipEvent(dispatchEvent)(state, overlays)
+      (state, overlays) => dispatchTooltipEvent(dispatchEvent)(state, overlays),
     );
   },
 };

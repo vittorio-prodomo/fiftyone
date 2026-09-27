@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import {
   setFieldVisibilityStage,
   type setFieldVisibilityStageMutation,
@@ -34,13 +38,13 @@ const onSetFieldVisibilityStage: RegisteredSetter =
     router.history.replace(
       resolveURL({
         currentPathname: router.history.location.pathname,
-        currentSearch: router.history.location.search,
+        currentSearch: router.location.search,
       }),
       {
         ...router.get().state,
         event: "fieldVisibility",
         fieldVisibility: stage,
-      }
+      },
     );
 
     // send event as side effect

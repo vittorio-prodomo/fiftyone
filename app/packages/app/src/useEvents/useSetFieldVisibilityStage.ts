@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import { subscribeBefore } from "@fiftyone/relay";
 import { useSessionRef, useSessionSetter } from "@fiftyone/state";
 import { useRecoilCallback } from "recoil";
@@ -27,16 +31,16 @@ const useSetFieldVisibilityStage: EventHandlerHook = () => {
         router.history.replace(
           resolveURL({
             currentPathname: router.history.location.pathname,
-            currentSearch: router.history.location.search,
+            currentSearch: router.location.search,
           }),
           {
             ...router.get().state,
             event: "fieldVisibility",
             fieldVisibility: stage,
-          }
+          },
         );
       },
-    [session, setter]
+    [session, setter],
   );
 };
 export default useSetFieldVisibilityStage;

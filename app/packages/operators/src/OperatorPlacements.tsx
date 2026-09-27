@@ -7,6 +7,7 @@ import {
 import { withSuspense } from "@fiftyone/state";
 import { isPrimitiveString } from "@fiftyone/utilities";
 import { Extension } from "@mui/icons-material";
+import { Box, IconButton, Tooltip } from "@mui/material";
 import styled from "styled-components";
 import { types } from ".";
 import OperatorIcon from "./OperatorIcon";
@@ -14,14 +15,17 @@ import { Operator } from "./operators";
 import {
   useOperatorExecutor,
   useOperatorPlacements,
+  useOperatorPromptOpen,
   usePromptOperatorInput,
 } from "./state";
 import { Placement, Places } from "./types";
 
 import { getStringAndNumberProps } from "@fiftyone/core/src/components/Actions/utils";
+import { PluginComponentType, useActivePlugins } from "@fiftyone/plugins";
+import { useCallback, type ReactNode } from "react";
 
 export function OperatorPlacementWithErrorBoundary(
-  props: OperatorPlacementProps
+  props: OperatorPlacementProps,
 ) {
   return (
     <ErrorBoundary
@@ -35,8 +39,10 @@ export function OperatorPlacementWithErrorBoundary(
 }
 
 function OperatorPlacements(props: OperatorPlacementsProps) {
-  const { place, modal } = props;
+  const { place, modal, fallback } = props;
   const { placements } = useOperatorPlacements(place);
+
+  if (!placements.length) return fallback ?? null;
 
   return placements.map((placement) => (
     <OperatorPlacementWithErrorBoundary
@@ -74,6 +80,7 @@ export default withSuspense(OperatorPlacements, () => null);
 
 const componentByView = {
   Button: ButtonPlacement,
+  ComponentView: ComponentPlacement,
 };
 
 function getPlacementComponent(placement: Placement) {
@@ -89,14 +96,13 @@ function OperatorPlacement(props: OperatorPlacementProps) {
 }
 
 function ButtonPlacement(props: OperatorPlacementProps) {
-  const promptForInput = usePromptOperatorInput();
   const { operator, placement, place, adaptiveMenuItemProps, modal } = props;
-  const { uri, label: operatorLabel, name: operatorName } = operator;
+  const { label: operatorLabel, name: operatorName } = operator;
   const { view = {} } = placement;
   const { label } = view;
-  const { icon, darkIcon, lightIcon, prompt = true } = view?.options || {};
-  const { execute } = useOperatorExecutor(uri);
-  const canExecute = operator?.config?.canExecute;
+  const { icon, darkIcon, lightIcon } = view?.options || {};
+  const { canExecute, execute } = usePlacementControls(props);
+  const open = useOperatorPromptOpen(operator.uri);
 
   const showIcon =
     isPrimitiveString(icon) ||
@@ -115,14 +121,6 @@ function ButtonPlacement(props: OperatorPlacementProps) {
     />
   );
 
-  const handleClick = () => {
-    if (prompt) {
-      promptForInput(uri);
-    } else {
-      execute({});
-    }
-  };
-
   if (
     place === types.Places.SAMPLES_GRID_ACTIONS ||
     place === types.Places.SAMPLES_GRID_SECONDARY_ACTIONS ||
@@ -131,29 +129,92 @@ function ButtonPlacement(props: OperatorPlacementProps) {
     return (
       <PillButton
         {...(getStringAndNumberProps(adaptiveMenuItemProps) || {})}
-        onClick={handleClick}
+        onClick={execute}
         icon={showIcon && IconComponent}
         text={!showIcon && title}
         title={title}
-        highlight={place === types.Places.SAMPLES_GRID_ACTIONS}
+        open={open}
+        highlight={open}
         style={{ whiteSpace: "nowrap" }}
         tooltipPlacement={modal ? "top" : "bottom"}
       />
     );
   }
 
+  if (place === types.Places.HEADER_ACTIONS) {
+    return (
+      <Tooltip title={title} onClick={execute}>
+        <IconButton sx={{ p: 0 }}>{IconComponent}</IconButton>
+      </Tooltip>
+    );
+  }
+
   return (
     <SquareButton
       {...(getStringAndNumberProps(adaptiveMenuItemProps) || {})}
-      to={handleClick}
-      title={label}
+      to={execute}
+      title={title}
     >
       {IconComponent}
     </SquareButton>
   );
 }
 
+function ComponentPlacement(props: OperatorPlacementProps) {
+  const componentPlugins = useActivePlugins(PluginComponentType.Component, {});
+  const { canExecute, execute } = usePlacementControls(props);
+  const componentName = props.placement?.view?.options?.component;
+
+  if (!componentName) {
+    throw new Error(
+      "ComponentPlacement requires a component name as an argument",
+    );
+  }
+
+  const Component = componentPlugins.find(
+    (plugin) => plugin.name === componentName,
+  )?.component;
+
+  if (!Component) {
+    throw new Error(
+      `Component ${componentName} not found among active plugins`,
+    );
+  }
+
+  return (
+    <Box sx={{ maxHeight: "50px", maxWidth: "100px", overflow: "hidden" }}>
+      <Component canExecute={canExecute} execute={execute} {...props} />
+    </Box>
+  );
+}
+
+export function usePlacementControls(props: OperatorPlacementProps) {
+  const { operator, placement, adaptiveMenuItemProps } = props;
+  const { prompt = true } = placement?.view?.options || {};
+  const { uri } = operator;
+  const canExecute = operator?.config?.canExecute;
+
+  const promptForInput = usePromptOperatorInput();
+  const { execute } = useOperatorExecutor(uri);
+  const closeOverflow = adaptiveMenuItemProps?.closeOverflow;
+
+  const handleClick = useCallback(() => {
+    // The action row's overflow popout outranks the operator palette, so one
+    // left open covers the prompt this click just opened
+    closeOverflow?.();
+    if (prompt) {
+      promptForInput(uri);
+    } else {
+      execute({});
+    }
+  }, [closeOverflow, prompt, promptForInput, uri, execute]);
+
+  return { canExecute, execute: handleClick };
+}
+
 type OperatorPlacementsProps = {
+  /** Content shown when no operator contributes to this placement. */
+  fallback?: ReactNode;
   place: Places;
   modal?: boolean;
 };

@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import { setSpaces, type setSpacesMutation } from "@fiftyone/relay";
 import { commitMutation } from "relay-runtime";
 import type { LocationState } from "../routing";
@@ -11,12 +15,12 @@ const onSetSessionSpaces: RegisteredWriter<"sessionSpaces"> =
     router.replace(
       resolveURL({
         currentPathname: router.history.location.pathname,
-        currentSearch: router.history.location.search,
+        currentSearch: router.location.search,
         extra: {
           workspace: spaces._name || null,
         },
       }),
-      { ...state, event: "spaces", workspace: spaces._name || null }
+      { ...state, event: "spaces", workspace: spaces },
     );
 
     commitMutation<setSpacesMutation>(environment, {

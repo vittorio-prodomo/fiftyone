@@ -1,15 +1,44 @@
 import type { CustomizeColorInput } from "@fiftyone/relay";
 import type { SpaceNodeJSON } from "@fiftyone/spaces";
+import type { RecognizedMediaType } from "@fiftyone/utilities";
+
+export type SelectionType = "default" | "alt";
+export type SelectionIconStyle =
+  | "checkmark"
+  | "green-checkmark"
+  | "red-checkmark"
+  | "thumbsup"
+  | "thumbsdown"
+  | "pin"
+  | "star"
+  | "x"
+  | "bookmark";
+export type SelectionStyle = {
+  default: SelectionIconStyle;
+  alt: SelectionIconStyle;
+};
+
+export const DEFAULT_SELECTION_STYLE: SelectionStyle = {
+  default: "checkmark",
+  alt: "checkmark",
+};
+
+export type LabelSelectionStyleName = "dashed" | "dashed-green" | "dashed-red";
+export type LabelSelectionStyle = {
+  default: LabelSelectionStyleName;
+  alt: LabelSelectionStyleName;
+};
+
+export const DEFAULT_LABEL_SELECTION_STYLE: LabelSelectionStyle = {
+  default: "dashed",
+  alt: "dashed",
+};
 
 export namespace State {
   export type MediaType =
-    | "image"
-    | "group"
+    | RecognizedMediaType
     | "point_cloud"
-    | "point-cloud"
     | "three_d"
-    | "3d"
-    | "video"
     | "unknown";
 
   export enum SPACE {
@@ -83,6 +112,12 @@ export namespace State {
   }
 
   export interface BrainRun extends Run {
+    /** Whether the run's results have been saved. A run still computing (or
+     * whose computation died) is not ready. */
+    ready: boolean | null;
+    /** Why the run cannot be used, when knowable from the run doc alone
+     * (e.g. its config class no longer imports); null when usable. */
+    error: string | null;
     config: {
       embeddingsField: string | null;
       method: string;
@@ -92,6 +127,10 @@ export namespace State {
       type: string | null;
       maxK: number | null;
       supportsLeastSimilarity: boolean | null;
+      /** Visualization runs */
+      numDims: number | null;
+      pointsField: string | null;
+      model: string | null;
     };
   }
 
@@ -151,6 +190,9 @@ export namespace State {
       [key: string]: Targets;
     };
     groupSlice?: string;
+    /** Where each media source the browser addresses by path is, by
+     * source id. Absent on datasets whose media is not reference-backed. */
+    mediaSources?: Readonly<Record<string, string>> | null;
     mediaType: MediaType;
     parentMediaType: MediaType;
     name: string;
@@ -189,6 +231,12 @@ export namespace State {
     _cls: string;
     kwargs: [string, unknown][];
     _uuid?: string;
+    /**
+     * The syntax an expression parameter was written in, keyed by parameter
+     * name. `kwargs` carries the lowered MongoDB the pipeline runs, which
+     * cannot be turned back into `F(...)`; this is what can.
+     */
+    _expr_asts?: Record<string, unknown>;
   }
 
   export interface SelectedLabelData {
@@ -196,6 +244,7 @@ export namespace State {
     field: string;
     frameNumber?: number;
     instanceId?: string;
+    type?: SelectionType;
   }
 
   export interface SelectedLabelMap {

@@ -1,26 +1,65 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import { spawnSync } from "child_process";
 import { Duration, getPythonCommand } from "src/oss/utils";
 import { dedentPythonCode } from "src/oss/utils/dedent";
+import type { MediaOptions } from "./types";
+import { generateOnce } from "./write";
 
 /**
- * This function creates a new pcd file with the specified number of points.
- * The points are arranged in a diagonal line in 3D space.
+ * What to write into a PCD point cloud.
  */
-export const createPcd = (options: {
-  outputPath: string;
+export interface PcdSpec {
+  /**
+   * The number of points to generate.
+   * For `"cube"` shape, actual count will be `floor(numPoints^(1/3))^3`.
+   */
   numPoints: number;
+  /**
+   * The spatial arrangement of the generated points.
+   * - `"diagonal"` — points along the 3D main diagonal: `[i, i, i]`
+   * - `"cube"` — points filling a uniform cubic grid
+   */
   shape: "diagonal" | "cube";
+  /**
+   * Optional NaN imputation config for injecting `NaN` into specific
+   * point coordinates. Useful for testing NaN-handling behavior.
+   */
   imputeNaN?: {
+    /**
+     * Array of `[pointIndex, coordinateIndex]` pairs identifying which
+     * coordinates to set to `NaN`. `coordinateIndex` maps to: `0`=x, `1`=y, `2`=z.
+     */
     indices: Array<number[]>;
   };
-}) => {
+}
+
+export type PcdOptions = MediaOptions & PcdSpec;
+
+export const DEFAULT_PCD_SPEC: PcdSpec = { shape: "cube", numPoints: 216 };
+
+/**
+ * Generates a PCD file at `outputPath` with `numPoints` points on the 3D
+ * diagonal (`[i, i, i]`) or filling a cubic grid of side
+ * `floor(numPoints^(1/3))`, via a pypcd4 subprocess with a 5-second timeout.
+ * Stderr is forwarded and a nonzero exit throws.
+ *
+ * @example
+ * createPcd({
+ *   outputPath: "/tmp/scene.pcd",
+ *   numPoints: 27,
+ *   shape: "cube",
+ *   imputeNaN: { indices: [[0, 0], [1, 2]] },
+ * });
+ */
+export const createPcd = (options: PcdOptions): void => {
   const { outputPath, numPoints, imputeNaN } = options;
 
-  const startTime = performance.now();
-  console.log(`Creating blank pcd with options: ${JSON.stringify(options)}`);
   const pythonCode = `
-  import open3d as o3d
-  pcd = o3d.geometry.PointCloud()
+  import numpy as np
+  from pypcd4 import Encoding, PointCloud
 
   if "${options.shape}" == "diagonal":
     points = [[i, i, i] for i in range(${numPoints})]
@@ -32,23 +71,26 @@ export const createPcd = (options: {
     for index in ${JSON.stringify(imputeNaN?.indices)}:
       points[index[0]][index[1]] = float("nan")
 
-  pcd.points = o3d.utility.Vector3dVector(points)
-  o3d.io.write_point_cloud("${outputPath}", pcd, write_ascii=True)
+  pc = PointCloud.from_xyz_points(np.array(points, dtype=np.float32))
+  pc.save("${outputPath}", Encoding.ASCII)
   `;
 
-  const command = getPythonCommand([
-    "-c",
-    `'''${dedentPythonCode(pythonCode)}'''`,
-  ]);
-  const proc = spawnSync(command, {
-    shell: true,
-    timeout: Duration.Seconds(5),
+  generateOnce("Pcd", options, () => {
+    const command = getPythonCommand([
+      "-c",
+      `'''${dedentPythonCode(pythonCode)}'''`,
+    ]);
+    const proc = spawnSync(command, {
+      shell: true,
+      timeout: Duration.Seconds(5),
+    });
+    if (proc.stderr) {
+      console.error(proc.stderr.toString());
+    }
+    if (proc.status !== 0) {
+      throw new Error(
+        `Pcd generation failed with exit code ${proc.status}: ${proc.stderr}`,
+      );
+    }
   });
-  if (proc.stderr) {
-    console.error(proc.stderr.toString());
-  }
-
-  const endTime = performance.now();
-  const timeTaken = endTime - startTime;
-  console.log(`Pcd generation completed in ${timeTaken} milliseconds`);
 };

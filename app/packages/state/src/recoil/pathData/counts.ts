@@ -1,12 +1,13 @@
 import { VALID_KEYPOINTS } from "@fiftyone/utilities";
-import { selectorFamily } from "recoil";
-import { aggregation } from "../aggregations";
+import { selectorFamily, waitForAll } from "recoil";
+import { aggregation, constrainsScope } from "../aggregations";
 import { datasetSampleCount } from "../dataset";
 import * as filterAtoms from "../filters";
 import { queryPerformance } from "../queryPerformance";
 import * as schemaAtoms from "../schema";
 import * as selectors from "../selectors";
-import { MATCH_LABEL_TAGS } from "../sidebar";
+import { selectionScopeBoundary } from "../selectionScope";
+import { MATCH_LABEL_TAGS, TEMPORAL_TAGS_FIELD } from "../sidebar";
 import * as viewAtoms from "../view";
 import { booleanCountResults } from "./boolean";
 import { gatherPaths } from "./utils";
@@ -25,11 +26,14 @@ export const count = selectorFamily({
       value?: string | null;
     }) =>
     ({ get }): number => {
+      // The estimated dataset count is only right when nothing narrows the
+      // results: no view, no filters, and no saved subset or segment source.
       if (
         !params.modal &&
         (params.path === "" || params.path === "_") &&
         !get(viewAtoms.view).length &&
-        get(queryPerformance)
+        get(queryPerformance) &&
+        !constrainsScope(get(selectionScopeBoundary))
       ) {
         if (
           !get(filterAtoms.hasFilters(false)) ||
@@ -73,6 +77,19 @@ export const count = selectorFamily({
           );
         }
 
+        if (first === TEMPORAL_TAGS_FIELD) {
+          const data = get(counts({ ...params, path: TEMPORAL_TAGS_FIELD }));
+
+          // `undefined` asks for the total; `null` asks for the "no value"
+          // row, which temporal tags do not have — a tag either covers a span
+          // of a sample or is absent from it.
+          if (value === undefined) {
+            return Object.values(data).reduce((a, b) => a + b, 0);
+          }
+
+          return value === null ? 0 : (data[value] ?? 0);
+        }
+
         if (split.length < 2) {
           // this will never resolve, which allows for incoming schema changes
           // this shouldn't be necessary, but there is a mismatch between
@@ -105,6 +122,12 @@ export const counts = selectorFamily({
   get:
     (params: { extended: boolean; path: string; modal: boolean }) =>
     ({ get }): { [key: string]: number } => {
+      // _label_tags is a pseudo-path derived client-side so queries
+      // for it should not reach the server
+      if (params.path === "_label_tags") {
+        return get(cumulativeCounts({ ...params, ...MATCH_LABEL_TAGS }));
+      }
+
       const exists = Boolean(get(schemaAtoms.field(params.path)));
 
       if (!exists) {
@@ -112,7 +135,7 @@ export const counts = selectorFamily({
 
         if (
           VALID_KEYPOINTS.includes(
-            get(schemaAtoms.field(parent))?.embeddedDocType
+            get(schemaAtoms.field(parent))?.embeddedDocType,
           )
         ) {
           const skeleton = get(selectors.skeleton(parent));
@@ -131,7 +154,7 @@ export const counts = selectorFamily({
 
       if (data.__typename === "StringAggregation") {
         return Object.fromEntries(
-          data.values.map(({ count, value }) => [value, count])
+          data.values.map(({ count, value }) => [value, count]),
         );
       }
 
@@ -143,7 +166,7 @@ export const counts = selectorFamily({
         get(booleanCountResults(params)).results.map(({ value, count }) => [
           value,
           count,
-        ])
+        ]),
       );
     },
 });
@@ -189,7 +212,7 @@ export const cumulativeCounts = selectorFamily<
           }
           return result;
         },
-        {}
+        {},
       );
     },
 });
@@ -202,12 +225,21 @@ export const noneCount = selectorFamily<
   get:
     (params) =>
     ({ get }) => {
-      const { count: aggCount = 0 } = get(aggregation(params)) ?? {};
+      // List fields and label-tags have no meaningful none bucket — bail
+      // before touching aggregations (and avoid an unused fetch).
+      const isLabelTag = params.path.startsWith("_label_tags");
+      if (isLabelTag || get(schemaAtoms.isListField(params.path))) {
+        return 0;
+      }
 
       const parent = params.path.split(".").slice(0, -1).join(".");
-      const isLabelTag = params.path.startsWith("_label_tags");
-      return get(schemaAtoms.isListField(params.path)) || isLabelTag
-        ? 0
-        : (get(count({ ...params, path: parent })) as number) - aggCount;
+      // Fetch the field aggregation and the parent count concurrently;
+      // sequential ``get``s waterfall (suspend on one, then fire the
+      // other), doubling latency when each aggregation is expensive
+      // (large datasets, cold caches, slower backends).
+      const [fieldAgg, parentCount] = get(
+        waitForAll([aggregation(params), count({ ...params, path: parent })]),
+      );
+      return (parentCount as number) - ((fieldAgg?.count as number) ?? 0);
     },
 });

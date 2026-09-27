@@ -1,10 +1,12 @@
 import { useOperatorExecutor } from "@fiftyone/operators";
 import { useCallback, useMemo } from "react";
+import type { ClassesComponent } from "./SchemaManager/constants";
+import type { AttributeConfig, SchemaConfigType } from "./SchemaManager/utils";
 
 /**
  * Schema field types.
  */
-type FieldType =
+export type FieldType =
   | "bool"
   | "date"
   | "datetime"
@@ -21,7 +23,7 @@ type FieldType =
 /**
  * Schema component types.
  */
-type ComponentType =
+export type ComponentType =
   | "checkbox"
   | "checkboxes"
   | "datepicker"
@@ -35,7 +37,7 @@ type ComponentType =
 /**
  * Schema definition for a single field.
  */
-type FieldSchema = {
+export type FieldSchema = {
   type: FieldType;
   component: ComponentType;
   read_only?: boolean;
@@ -43,6 +45,10 @@ type FieldSchema = {
   range?: [number, number];
   values?: (string | number)[];
   classes?: string[];
+  default?: unknown;
+  attributes?: AttributeConfig[];
+  applied_ontology?: string;
+  applied_taxonomy?: string;
 };
 
 /**
@@ -131,6 +137,29 @@ export type UpdateSchemaResponse = {
   label_schema: FieldSchema;
 };
 
+export type LabelSchemaConfig = {
+  classes?: string[];
+  attributes?: AttributeConfig[];
+  new_attributes?: AttributeConfig[];
+  /** Input type for the classes; omitted = the operator picks by class count */
+  component?: ClassesComponent;
+};
+
+export type CreateAndActivateFieldRequest = {
+  field_name: string;
+  field_category: "label" | "primitive";
+  field_type: string;
+  read_only?: boolean;
+  label_schema_config?: LabelSchemaConfig;
+  schema_config?: SchemaConfigType;
+};
+
+export type CreateAndActivateFieldResponse = {
+  field_name: string;
+  label_schema: FieldSchema;
+  error?: string;
+};
+
 export type ValidateSchemasRequest = {
   label_schemas?: AnnotationSchema;
 };
@@ -149,8 +178,17 @@ export interface SchemaManager {
    * @param request Activation request
    */
   activateSchemas: (
-    request: ActivateSchemasRequest
+    request: ActivateSchemasRequest,
   ) => Promise<ActivateSchemasResponse>;
+
+  /**
+   * Create a new field and activate it for annotation.
+   *
+   * @param request Creation request
+   */
+  createAndActivateField: (
+    request: CreateAndActivateFieldRequest,
+  ) => Promise<CreateAndActivateFieldResponse>;
 
   /**
    * Create one or more new schema.
@@ -158,7 +196,7 @@ export interface SchemaManager {
    * @param request Creation request
    */
   createSchemas: (
-    request: CreateSchemasRequest
+    request: CreateSchemasRequest,
   ) => Promise<CreateSchemasResponse>;
 
   /**
@@ -167,7 +205,7 @@ export interface SchemaManager {
    * @param request Deactivation request
    */
   deactivateSchemas: (
-    request: DeactivateSchemasRequest
+    request: DeactivateSchemasRequest,
   ) => Promise<DeactivateSchemasResponse>;
 
   /**
@@ -176,7 +214,7 @@ export interface SchemaManager {
    * @param request Deletion request
    */
   deleteSchemas: (
-    request: DeleteSchemasRequest
+    request: DeleteSchemasRequest,
   ) => Promise<DeleteSchemasResponse>;
 
   /**
@@ -187,7 +225,7 @@ export interface SchemaManager {
    * @param request Initialization request
    */
   initializeSchema: (
-    request: InitializeSchemaRequest
+    request: InitializeSchemaRequest,
   ) => Promise<InitializeSchemaResponse>;
 
   /**
@@ -203,7 +241,7 @@ export interface SchemaManager {
    * @param request List request
    */
   listValidAnnotationFields: (
-    request: ListValidAnnotationFieldsRequest
+    request: ListValidAnnotationFieldsRequest,
   ) => Promise<ListValidAnnotationFieldsResponse>;
 
   /**
@@ -212,7 +250,7 @@ export interface SchemaManager {
    * @param request Set request
    */
   setActiveSchemas: (
-    request: SetActiveSchemasRequest
+    request: SetActiveSchemasRequest,
   ) => Promise<SetActiveSchemasResponse>;
 
   /**
@@ -228,7 +266,7 @@ export interface SchemaManager {
    * @param request Validation request
    */
   validateSchemas: (
-    request: ValidateSchemasRequest
+    request: ValidateSchemasRequest,
   ) => Promise<ValidateSchemasResponse>;
 }
 
@@ -247,13 +285,23 @@ type OperatorResponse<T> = {
 type OperatorCallback<T> = (response: OperatorResponse<T>) => void;
 
 /**
+ * Extra options forwarded to the operator executor.
+ */
+type OperatorExecuteOptions = {
+  skipErrorNotification?: boolean;
+};
+
+/**
  * Type representing an operator.
  *
  * This type is an incomplete definition and exists for type-safety of
  * logic in this file.
  */
-type Operator<T, R> = {
-  execute: (request: T, options: { callback?: OperatorCallback<R> }) => void;
+export type Operator<T, R> = {
+  execute: (
+    request: T,
+    options: { callback?: OperatorCallback<R> } & OperatorExecuteOptions,
+  ) => void;
 };
 
 /**
@@ -265,14 +313,16 @@ type Operator<T, R> = {
  *
  * @param operator Operator to execute
  * @param request Request body
+ * @param options Extra options forwarded to the operator executor
  */
-const operatorAsPromise = <T, R>(
+export const operatorAsPromise = <T, R>(
   operator: Operator<T, R>,
-  request: T
+  request: T,
+  options?: OperatorExecuteOptions,
 ): Promise<R> => {
   return new Promise((resolve, reject) => {
     const operatorCallback: OperatorCallback<R> = (
-      response: OperatorResponse<R>
+      response: OperatorResponse<R>,
     ) => {
       if (response.error) {
         reject(new Error(response.error));
@@ -281,7 +331,7 @@ const operatorAsPromise = <T, R>(
       }
     };
 
-    operator.execute(request, { callback: operatorCallback });
+    operator.execute(request, { callback: operatorCallback, ...options });
   });
 };
 
@@ -290,104 +340,118 @@ const operatorAsPromise = <T, R>(
  */
 export const useSchemaManager = (): SchemaManager => {
   const activateSchemasOperator = useOperatorExecutor(
-    "@voxel51/operators/activate_label_schemas"
+    "@voxel51/operators/activate_label_schemas",
   ) as Operator<ActivateSchemasRequest, ActivateSchemasResponse>;
+  const createAndActivateFieldOperator = useOperatorExecutor(
+    "@voxel51/operators/create_and_activate_field",
+  ) as Operator<CreateAndActivateFieldRequest, CreateAndActivateFieldResponse>;
   const createSchemasOperator = useOperatorExecutor(
-    "@voxel51/operators/generate_label_schemas"
+    "@voxel51/operators/generate_label_schemas",
   ) as Operator<CreateSchemasRequest, CreateSchemasResponse>;
   const deactivateSchemasOperator = useOperatorExecutor(
-    "@voxel51/operators/deactivate_label_schemas"
+    "@voxel51/operators/deactivate_label_schemas",
   ) as Operator<DeactivateSchemasRequest, DeactivateSchemasResponse>;
   const deleteSchemasOperator = useOperatorExecutor(
-    "@voxel51/operators/delete_label_schemas"
+    "@voxel51/operators/delete_label_schemas",
   ) as Operator<DeleteSchemasRequest, DeleteSchemasResponse>;
   const listSchemasOperator = useOperatorExecutor(
-    "@voxel51/operators/get_label_schemas"
+    "@voxel51/operators/get_label_schemas",
   ) as Operator<ListSchemasRequest, ListSchemasResponse>;
   const listValidFieldsOperator = useOperatorExecutor(
-    "@voxel51/operators/list_valid_annotation_fields"
+    "@voxel51/operators/list_valid_annotation_fields",
   ) as Operator<
     ListValidAnnotationFieldsRequest,
     ListValidAnnotationFieldsResponse
   >;
   const setActiveSchemasOperator = useOperatorExecutor(
-    "@voxel51/operators/set_active_label_schemas"
+    "@voxel51/operators/set_active_label_schemas",
   ) as Operator<SetActiveSchemasRequest, SetActiveSchemasResponse>;
   const updateSchemaOperator = useOperatorExecutor(
-    "@voxel51/operators/update_label_schema"
+    "@voxel51/operators/update_label_schema",
   ) as Operator<UpdateSchemaRequest, UpdateSchemaResponse>;
   const validateSchemasOperator = useOperatorExecutor(
-    "@voxel51/operators/validate_label_schemas"
+    "@voxel51/operators/validate_label_schemas",
   ) as Operator<ValidateSchemasRequest, ValidateSchemasResponse>;
 
   const activateSchemas = useCallback(
     (request: ActivateSchemasRequest): Promise<ActivateSchemasResponse> => {
       return operatorAsPromise(activateSchemasOperator, request);
     },
-    [activateSchemasOperator]
+    [activateSchemasOperator],
+  );
+
+  const createAndActivateField = useCallback(
+    (
+      request: CreateAndActivateFieldRequest,
+    ): Promise<CreateAndActivateFieldResponse> => {
+      return operatorAsPromise(createAndActivateFieldOperator, request);
+    },
+    [createAndActivateFieldOperator],
   );
 
   const createSchemas = useCallback(
     (request: CreateSchemasRequest): Promise<CreateSchemasResponse> => {
       return operatorAsPromise(createSchemasOperator, request);
     },
-    [createSchemasOperator]
+    [createSchemasOperator],
   );
 
   const deactivateSchema = useCallback(
     (request: DeactivateSchemasRequest): Promise<DeactivateSchemasResponse> => {
       return operatorAsPromise(deactivateSchemasOperator, request);
     },
-    [deactivateSchemasOperator]
+    [deactivateSchemasOperator],
   );
 
   const deleteSchemas = useCallback(
     (request: DeleteSchemasRequest): Promise<DeleteSchemasResponse> => {
       return operatorAsPromise(deleteSchemasOperator, request);
     },
-    [deleteSchemasOperator]
+    [deleteSchemasOperator],
   );
 
   const listSchemas = useCallback(
     (request: ListSchemasRequest): Promise<ListSchemasResponse> => {
       return operatorAsPromise(listSchemasOperator, request);
     },
-    [listSchemasOperator]
+    [listSchemasOperator],
   );
 
   const listValidFields = useCallback(
     (
-      request: ListValidAnnotationFieldsRequest
+      request: ListValidAnnotationFieldsRequest,
     ): Promise<ListValidAnnotationFieldsResponse> => {
       return operatorAsPromise(listValidFieldsOperator, request);
     },
-    [listValidFieldsOperator]
+    [listValidFieldsOperator],
   );
 
   const setActiveSchemas = useCallback(
     (request: SetActiveSchemasRequest): Promise<SetActiveSchemasResponse> => {
       return operatorAsPromise(setActiveSchemasOperator, request);
     },
-    [setActiveSchemasOperator]
+    [setActiveSchemasOperator],
   );
 
   const updateSchema = useCallback(
     (request: UpdateSchemaRequest): Promise<UpdateSchemaResponse> => {
       return operatorAsPromise(updateSchemaOperator, request);
     },
-    [updateSchemaOperator]
+    [updateSchemaOperator],
   );
 
   const validateSchemas = useCallback(
     (request: ValidateSchemasRequest): Promise<ValidateSchemasResponse> => {
-      return operatorAsPromise(validateSchemasOperator, request);
+      return operatorAsPromise(validateSchemasOperator, request, {
+        skipErrorNotification: true,
+      });
     },
-    [validateSchemasOperator]
+    [validateSchemasOperator],
   );
 
   const initializeSchema = useCallback(
     async (
-      request: InitializeSchemaRequest
+      request: InitializeSchemaRequest,
     ): Promise<InitializeSchemaResponse> => {
       const createResponse = await createSchemas({
         field: request.field,
@@ -403,12 +467,13 @@ export const useSchemaManager = (): SchemaManager => {
         label_schema: updateResponse.label_schema,
       };
     },
-    [createSchemas, updateSchema]
+    [createSchemas, updateSchema],
   );
 
   return useMemo(
     () => ({
       activateSchemas: activateSchemas,
+      createAndActivateField: createAndActivateField,
       createSchemas: createSchemas,
       deactivateSchemas: deactivateSchema,
       deleteSchemas: deleteSchemas,
@@ -421,6 +486,7 @@ export const useSchemaManager = (): SchemaManager => {
     }),
     [
       activateSchemas,
+      createAndActivateField,
       createSchemas,
       deactivateSchema,
       deleteSchemas,
@@ -430,6 +496,6 @@ export const useSchemaManager = (): SchemaManager => {
       setActiveSchemas,
       updateSchema,
       validateSchemas,
-    ]
+    ],
   );
 };

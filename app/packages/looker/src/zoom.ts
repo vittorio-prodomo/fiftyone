@@ -61,7 +61,7 @@ export const filterOverlaysForZoom = <State extends BaseState>(
 
 const adjustBox = (
   [w, h]: Dimensions,
-  [obtlx, obtly, obw, obh]: BoundingBox
+  [obtlx, obtly, obw, obh]: BoundingBox,
 ): {
   center: Coordinates;
   box: BoundingBox;
@@ -90,10 +90,10 @@ const adjustBox = (
 };
 
 export const zoomToContent = <
-  State extends FrameState | ImageState | VideoState
+  State extends FrameState | ImageState | VideoState,
 >(
   state: Readonly<State>,
-  overlays: Overlay<State>[]
+  overlays: Overlay<State>[],
 ): State => {
   const points = overlays.map((o) => o.getPoints(state)).flat();
   const [iw, ih] = state.dimensions;
@@ -150,7 +150,7 @@ export const zoomToContent = <
 export const zoomAspectRatio = (
   sample: object,
   schema: Schema,
-  mediaAspectRatio: number
+  mediaAspectRatio: number,
 ): number => {
   let points = [];
 
