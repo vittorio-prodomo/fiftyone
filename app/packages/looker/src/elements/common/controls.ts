@@ -343,7 +343,7 @@ export class JSONButtonElement<
 }
 
 export class DownloadButtonElement<
-  State extends BaseState
+  State extends BaseState,
 > extends BaseElement<State> {
   private spinning = false;
   private timeoutId: ReturnType<typeof setTimeout> | null = null;

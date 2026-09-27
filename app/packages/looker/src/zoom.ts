@@ -50,7 +50,7 @@ export const getPatchesField = (view: Stage[]): string | null => {
  */
 export const filterOverlaysForZoom = <State extends BaseState>(
   view: Stage[],
-  overlays: Overlay<State>[]
+  overlays: Overlay<State>[],
 ): Overlay<State>[] => {
   const patchesField = getPatchesField(view);
   if (!patchesField) return overlays;
