@@ -135,7 +135,8 @@ const CLIPS_VIEW = "fiftyone.core.clips.ClipsView";
 const FRAMES_VIEW = "fiftyone.core.video.FramesView";
 const EVALUATION_PATCHES_VIEW = "fiftyone.core.patches.EvaluationPatchesView";
 const PATCHES_VIEW = "fiftyone.core.patches.PatchesView";
-const PATCH_VIEWS = [PATCHES_VIEW, EVALUATION_PATCHES_VIEW];
+const TILES_VIEW = "fiftyone.core.tiles.TilesView";
+const PATCH_VIEWS = [PATCHES_VIEW, EVALUATION_PATCHES_VIEW, TILES_VIEW];
 
 export const GROUP_BY_VIEW_STAGE = "fiftyone.core.stages.GroupBy";
 export const LIMIT_VIEW_STAGE = "fiftyone.core.stages.Limit";

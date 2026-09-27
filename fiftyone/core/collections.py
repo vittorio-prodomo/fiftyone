@@ -8366,59 +8366,63 @@ class SampleCollection(object):
         tile_size,
         overlap=0,
         other_fields=True,
-        min_coverage=0.0,
+        min_label_coverage=0.0,
         **kwargs,
     ):
-        """Creates a view that contains one sample per tile of each image
-        in the collection.
+        """Creates a view that contains one sample per tile of each image in
+        the collection.
 
-        A regular grid of :class:`fiftyone.core.labels.Detection` objects is
-        generated for each sample based on the specified tile size and stored
-        internally. The view is then created by converting these detections
-        into patches.
+        Tiles views preview how a collection would look when split into
+        fixed-size tiles: each image is covered by a regular grid of
+        ``tile_size`` tiles with the given overlap, using the minimum number
+        of rows and columns. The last tile of each row/column is shifted back
+        so that it ends exactly at the image edge, which may increase its
+        overlap with the previous tile. In any dimension in which an image is
+        smaller than the tile, its tiles are clamped to the image size.
+
+        Each tile's region is stored in a ``tile_regions`` field of the view,
+        and a ``sample_id`` field records the sample ID from which each tile
+        was taken. By default, all other fields are included, and the label
+        fields among them only keep the labels that touch each tile, in
+        full-image coordinates.
+
+        Tiles views never modify this collection: tags and label edits made
+        in a tiles view stay in the view.
 
         Samples **must** have their
         :class:`fiftyone.core.metadata.ImageMetadata` populated.
 
-        By default, all other fields are included in the returned view.
-
-        A ``sample_id`` field will be added that records the sample ID from
-        which each tile was taken.
-
         Examples::
 
             import fiftyone as fo
+            import fiftyone.zoo as foz
 
-            dataset = fo.Dataset()
-            dataset.add_sample(
-                fo.Sample(
-                    filepath="image.png",
-                    metadata=fo.ImageMetadata(width=1280, height=1280),
-                )
-            )
+            dataset = foz.load_zoo_dataset("quickstart")
+            dataset.compute_metadata()
 
             #
-            # Create a view containing 640x640 tiles
+            # Create a view containing 256x256 tiles
             #
 
-            view = dataset.to_tiles(tile_size=(640, 640))
+            view = dataset.to_tiles(tile_size=(256, 256))
             print(view)
 
             #
-            # Create a tiles view with 64px overlap
+            # Tiles that overlap by 32 pixels and only keep labels with at
+            # least half of their area inside the tile
             #
 
-            view = dataset.to_tiles(tile_size=(640, 640), overlap=64)
+            view = dataset.to_tiles(
+                tile_size=(256, 256), overlap=32, min_label_coverage=0.5
+            )
             print(view)
 
         Args:
             tile_size: a ``(width, height)`` tuple specifying the tile size
                 in pixels
-            overlap (0): overlap between adjacent tiles. Values >= 1 are
+            overlap (0): the overlap between adjacent tiles. Values >= 1 are
                 interpreted as pixels; values in [0, 1) are interpreted as
                 fractions of the tile size
-            min_coverage (0.0): minimum fraction of tile area that must lie
-                within the image for edge tiles to be included
             other_fields (True): controls whether fields other than the tile
                 regions and the default sample fields are included. Can be
                 any of the following:
@@ -8426,21 +8430,23 @@ class SampleCollection(object):
                 -   a field or list of fields to include
                 -   ``True`` to include all other fields
                 -   ``None``/``False`` to include no other fields
-            keep_label_lists (False): whether to store the patches in label
-                list fields of the same type as the input collection rather
-                than using their single label variants
-            include_indexes (False): whether to recreate any custom indexes
-                on the patches view
+            min_label_coverage (0.0): the minimum fraction of a label's area
+                that must lie within a tile for the tile to keep it. By
+                default, every label that touches a tile is kept. The area of
+                polylines and keypoints is that of their bounding box
+            **kwargs: optional keyword arguments for
+                :meth:`fiftyone.core.tiles.make_tiles_dataset` specifying how
+                to perform the conversion
 
         Returns:
-            a :class:`fiftyone.core.patches.PatchesView`
+            a :class:`fiftyone.core.tiles.TilesView`
         """
         return self._add_view_stage(
             fos.ToTiles(
                 tile_size,
                 overlap=overlap,
                 other_fields=other_fields,
-                min_coverage=min_coverage,
+                min_label_coverage=min_label_coverage,
                 **kwargs,
             )
         )

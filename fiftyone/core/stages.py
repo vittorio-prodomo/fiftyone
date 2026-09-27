@@ -8624,54 +8624,64 @@ class ToTiles(ViewStage):
     """Creates a view that contains one sample per tile of each image in a
     collection.
 
-    A regular grid of :class:`fiftyone.core.labels.Detection` objects is
-    generated for each sample and stored in a temporary ``tile_regions``
-    field. The view is then created by converting these detections into
-    patches via :meth:`fiftyone.core.patches.make_patches_dataset`.
+    Tiles views preview how a collection would look when split into
+    fixed-size tiles: each image is covered by a regular grid of
+    ``tile_size`` tiles with the given overlap, using the minimum number of
+    rows and columns. The last tile of each row/column is shifted back so
+    that it ends exactly at the image edge, which may increase its overlap
+    with the previous tile. In any dimension in which an image is smaller
+    than the tile, its tiles are clamped to the image size.
+
+    Each tile's region is stored in a ``tile_regions`` field of the view,
+    and a ``sample_id`` field records the sample ID from which each tile was
+    taken. By default, all other fields are included (unlike
+    :class:`ToPatches`), and the label fields among them only keep the
+    labels that touch each tile, in full-image coordinates.
+
+    Tiles views never modify their source collection: tags and label edits
+    made in a tiles view stay in the view.
 
     Samples **must** have their
     :class:`fiftyone.core.metadata.ImageMetadata` populated.
 
-    By default, all other fields are included in the returned view (unlike
-    :class:`ToPatches`, which defaults to ``None``).
-
-    A ``sample_id`` field will be added that records the sample ID from which
-    each tile was taken.
-
     Examples::
 
         import fiftyone as fo
+        import fiftyone.zoo as foz
 
-        dataset = fo.Dataset()
-        dataset.add_sample(
-            fo.Sample(
-                filepath="image.png",
-                metadata=fo.ImageMetadata(width=1280, height=1280),
-            )
-        )
+        dataset = foz.load_zoo_dataset("quickstart")
+        dataset.compute_metadata()
 
         #
-        # Create a view containing 640x640 tiles
+        # Create a view containing 256x256 tiles that overlap by 32 pixels
         #
 
-        stage = fo.ToTiles(tile_size=(640, 640))
+        stage = fo.ToTiles(tile_size=(256, 256), overlap=32)
         view = dataset.add_stage(stage)
         print(view)
 
     Args:
         tile_size: a ``(width, height)`` tuple specifying the tile size in
             pixels
-        overlap (0): overlap between adjacent tiles. Values >= 1 are
+        overlap (0): the overlap between adjacent tiles. Values >= 1 are
             interpreted as pixels; values in [0, 1) are interpreted as
             fractions of the tile size
-        min_coverage (0.0): minimum fraction of tile area that must lie
-            within the image for edge tiles to be included
+        other_fields (True): controls whether fields other than the tile
+            regions and the default sample fields are included. Can be any
+            of the following:
+
+            -   a field or list of fields to include
+            -   ``True`` to include all other fields
+            -   ``None``/``False`` to include no other fields
+        min_label_coverage (0.0): the minimum fraction of a label's area that
+            must lie within a tile for the tile to keep it. By default, every
+            label that touches a tile is kept
         config (None): an optional dict of keyword arguments for
-            :meth:`fiftyone.core.patches.make_patches_dataset` specifying
-            how to perform the conversion
+            :meth:`fiftyone.core.tiles.make_tiles_dataset` specifying how to
+            perform the conversion
         **kwargs: optional keyword arguments for
-            :meth:`fiftyone.core.patches.make_patches_dataset` specifying
-            how to perform the conversion
+            :meth:`fiftyone.core.tiles.make_tiles_dataset` specifying how to
+            perform the conversion
     """
 
     _TILE_FIELD = "tile_regions"
@@ -8681,11 +8691,15 @@ class ToTiles(ViewStage):
         tile_size,
         overlap=0,
         other_fields=True,
-        min_coverage=0.0,
+        min_label_coverage=0.0,
         config=None,
         _state=None,
         **kwargs,
     ):
+        # Views saved before edge tiles were shifted carry this parameter,
+        # which no longer applies
+        kwargs.pop("min_coverage", None)
+
         if kwargs:
             if config is None:
                 config = kwargs
@@ -8695,7 +8709,7 @@ class ToTiles(ViewStage):
         self._tile_size = tile_size
         self._overlap = overlap
         self._other_fields = other_fields
-        self._min_coverage = min_coverage
+        self._min_label_coverage = min_label_coverage
         self._config = config
         self._state = _state
 
@@ -8705,7 +8719,7 @@ class ToTiles(ViewStage):
 
     @property
     def field(self):
-        """The patches field used for the tile regions."""
+        """The field that stores the tile regions."""
         return self._TILE_FIELD
 
     @property
@@ -8724,9 +8738,11 @@ class ToTiles(ViewStage):
         return self._other_fields
 
     @property
-    def min_coverage(self):
-        """The minimum tile coverage."""
-        return self._min_coverage
+    def min_label_coverage(self):
+        """The minimum fraction of a label's area that must lie within a tile
+        for the tile to keep it.
+        """
+        return self._min_label_coverage
 
     @property
     def config(self):
@@ -8734,9 +8750,7 @@ class ToTiles(ViewStage):
         return self._config
 
     def load_view(self, sample_collection, saved_view=False, reload=False):
-        from fiftyone.core.tiles import compute_tile_detections
-
-        tile_w, tile_h = self._tile_size
+        import fiftyone.core.tiles as fot
 
         state = {
             "dataset_id": str(sample_collection._root_dataset._doc.id),
@@ -8744,7 +8758,7 @@ class ToTiles(ViewStage):
             "tile_size": list(self._tile_size),
             "overlap": self._overlap,
             "other_fields": self._other_fields,
-            "min_coverage": self._min_coverage,
+            "min_label_coverage": self._min_label_coverage,
             "config": self._config,
         }
 
@@ -8764,32 +8778,6 @@ class ToTiles(ViewStage):
             or last_dataset is None
             or (state != last_state and not saved_view)
         ):
-            # Compute tile detections for each sample
-            root_dataset = sample_collection._root_dataset
-            tile_field = self._TILE_FIELD
-
-            # Pre-validate metadata before writing any tile fields
-            missing = sample_collection.exists("metadata", False)
-            if len(missing) > 0:
-                raise ValueError(
-                    "Found %d sample(s) without metadata. You must "
-                    "run `dataset.compute_metadata()` before calling "
-                    "`to_tiles()`" % len(missing)
-                )
-
-            for sample in sample_collection.iter_samples(
-                autosave=True, progress=True
-            ):
-                dets = compute_tile_detections(
-                    sample.metadata.width,
-                    sample.metadata.height,
-                    tile_w,
-                    tile_h,
-                    overlap=self._overlap,
-                    min_coverage=self._min_coverage,
-                )
-                sample[tile_field] = fol.Detections(detections=dets)
-
             kwargs = deepcopy(self._config) or {}
             kwargs["other_fields"] = (
                 None if self._other_fields is False else self._other_fields
@@ -8798,9 +8786,11 @@ class ToTiles(ViewStage):
             if reload and last_dataset is not None:
                 kwargs["include_indexes"] = last_dataset
 
-            patches_dataset = fop.make_patches_dataset(
+            tiles_dataset = fot.make_tiles_dataset(
                 sample_collection,
-                tile_field,
+                self._tile_size,
+                overlap=self._overlap,
+                min_label_coverage=self._min_label_coverage,
                 _generated=True,
                 **kwargs,
             )
@@ -8809,27 +8799,21 @@ class ToTiles(ViewStage):
                 if last_dataset is not None:
                     last_dataset._delete()
 
-                patches_dataset.name = name
-
-            # Clean up the temporary tile field from the source dataset
-            try:
-                root_dataset.delete_sample_field(tile_field)
-            except Exception:
-                pass
+                tiles_dataset.name = name
         else:
-            patches_dataset = last_dataset
+            tiles_dataset = last_dataset
 
-        state["name"] = patches_dataset.name
+        state["name"] = tiles_dataset.name
         self._state = state
 
-        return fop.PatchesView(sample_collection, self, patches_dataset)
+        return fot.TilesView(sample_collection, self, tiles_dataset)
 
     def _kwargs(self):
         return [
             ["tile_size", self._tile_size],
             ["overlap", self._overlap],
             ["other_fields", self._other_fields],
-            ["min_coverage", self._min_coverage],
+            ["min_label_coverage", self._min_label_coverage],
             ["config", self._config],
             ["_state", self._state],
         ]
@@ -8854,10 +8838,10 @@ class ToTiles(ViewStage):
                 "default": "True",
             },
             {
-                "name": "min_coverage",
+                "name": "min_label_coverage",
                 "type": "float",
                 "default": "0.0",
-                "placeholder": "min coverage (default=0.0)",
+                "placeholder": "min label coverage (default=0.0)",
             },
             {
                 "name": "config",

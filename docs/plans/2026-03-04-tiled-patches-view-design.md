@@ -92,3 +92,36 @@ maps normalized coordinates to canvas space correctly regardless of zoom/pan.
    context
 4. Clicking a tile opens full image zoomed to that region
 5. De-zooming reveals the whole image with all annotations intact
+
+## Revision (2026-09): tiles computed in the database
+
+The first implementation wrote a temporary `tile_regions` field to every sample
+of the source dataset, built the view with `make_patches_dataset()`, and
+deleted the field again. That modified the source (every sample's
+`last_modified_at`, and any user field named `tile_regions`), made concurrent
+tiles views of one dataset silently mix their tiles, and broke tagging of tile
+labels (the patches view synced them back to the deleted field). Tiles also
+kept every label of their image.
+
+The stage now works as follows:
+
+- **Nothing is written to the source.** `make_tiles_dataset()` in
+  `fiftyone/core/tiles.py` computes each image's tiles inside the aggregation
+  that builds the tiles dataset (from `metadata.width/height`), mirroring
+  upstream's `make_patches_dataset()` pipeline. It is also ~7x faster (84,000
+  tiles of 2,000 4000x3000 images: 4.7s vs 32.6s)
+- **Shift edge mode.** Each row/column uses the minimum number of tiles; the
+  last one is shifted back to end at the image edge (its overlap with the
+  previous tile grows). Where the image is smaller than the tile, tiles are
+  clamped to the image size (no padding). `min_coverage` was removed; saved
+  views that still carry it load with it ignored
+- **Per-tile labels.** Top-level `Detections`/`Polylines`/`Keypoints` fields
+  (and single-label variants) keep only the labels that touch the tile, in
+  full-image coordinates. `min_label_coverage` optionally requires a minimum
+  fraction of each label's area (bounding box area for polylines and keypoints)
+  inside the tile. Image-level labels are copied as-is
+- **View-local edits.** `TilesView` (a `PatchesView` subclass) syncs nothing
+  back to the source, so tags and label edits stay in the view
+- The App recognizes `fiftyone.core.tiles.TilesView` as a patches view
+  (`PATCH_VIEWS` in `state/src/recoil/view.ts`); `tiles_tests.py` checks that
+  the App's hardcoded names match the Python ones
