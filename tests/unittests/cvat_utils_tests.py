@@ -10,6 +10,7 @@ import os
 import unittest
 
 import fiftyone as fo  # noqa: F401  bootstrap modules to avoid circular imports
+import fiftyone.utils.cvat as fouc
 from fiftyone.utils.cvat import _BasenameLookup
 
 
@@ -212,5 +213,112 @@ class TestBasenameLookup(unittest.TestCase):
         self.assertEqual(list(lookup), ["/data/a.jpg", "/data/b.jpg"])
 
 
+class _FakeResponse(object):
+    def __init__(self, data):
+        self._data = data
+
+    def json(self):
+        return self._data
+
+
+class _FakeCVATAPI(object):
+    """Returns a canned ``tasks/{id}/data/meta`` response so that
+    :func:`fiftyone.utils.cvat._parse_task_metadata` runs without a server.
+    """
+
+    def __init__(self, meta):
+        self._meta = meta
+
+    def task_data_meta_url(self, task_id):
+        return "http://cvat.test/api/tasks/%s/data/meta" % task_id
+
+    def get(self, url):
+        return _FakeResponse(self._meta)
+
+
+class TestParseTaskMetadataFrameFilters(unittest.TestCase):
+    """Job frame ranges and CVAT's deleted frames both exclude frames."""
+
+    def _parse(self, deleted_frames=None, frame_ranges=None):
+        meta = {
+            "start_frame": 0,
+            "stop_frame": 5,
+            "chunk_size": 10,
+            "frames": [{"name": "img%d.jpg" % i} for i in range(6)],
+        }
+        if deleted_frames is not None:
+            meta["deleted_frames"] = deleted_frames
+
+        data_map = {"img%d.jpg" % i: "/data/img%d.jpg" % i for i in range(6)}
+        cvat_id_map = fouc._parse_task_metadata(
+            _FakeCVATAPI(meta),
+            1,
+            data_map,
+            [],
+            [],
+            [],
+            frame_ranges=frame_ranges,
+        )
+        return sorted(cvat_id_map.values())
+
+    def test_no_filters_keeps_every_frame(self):
+        self.assertEqual(self._parse(), [0, 1, 2, 3, 4, 5])
+
+    def test_frame_ranges_are_inclusive(self):
+        self.assertEqual(self._parse(frame_ranges=[(1, 2), (4, 4)]), [1, 2, 4])
+
+    def test_deleted_frames_are_skipped(self):
+        self.assertEqual(self._parse(deleted_frames=[0, 3]), [1, 2, 4, 5])
+
+    def test_both_filters_combine(self):
+        self.assertEqual(
+            self._parse(deleted_frames=[2], frame_ranges=[(1, 3)]), [1, 3]
+        )
+
+
+class TestCVATResultsJobIdsFilter(unittest.TestCase):
+    """The imported job IDs survive a save/load of the annotation run, so
+    that ``load_annotations()`` only downloads those jobs.
+    """
+
+    def _results(self, job_ids_filter):
+        return fouc.CVATAnnotationResults(
+            None,
+            fouc.CVATBackendConfig("cvat", {}),
+            "anno",
+            {},
+            {},
+            [],
+            [7],
+            {7: [70, 71, 72]},
+            {7: {}},
+            {"ground_truth": [7]},
+            job_ids_filter=job_ids_filter,
+        )
+
+    def _round_trip(self, results):
+        d = results.serialize()
+        return fouc.CVATAnnotationResults._from_dict(
+            d, None, results.config, "anno"
+        )
+
+    def test_filter_round_trips(self):
+        results = self._round_trip(self._results({71, 72}))
+        self.assertEqual(sorted(results.job_ids_filter), [71, 72])
+
+    def test_no_filter_round_trips_as_none(self):
+        results = self._round_trip(self._results(None))
+        self.assertIsNone(results.job_ids_filter)
+
+    def test_runs_saved_before_the_filter_existed_still_load(self):
+        d = self._results(None).serialize()
+        d.pop("job_ids_filter", None)
+        results = fouc.CVATAnnotationResults._from_dict(
+            d, None, fouc.CVATBackendConfig("cvat", {}), "anno"
+        )
+        self.assertIsNone(results.job_ids_filter)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    fo.config.show_progress_bars = False
+    unittest.main(verbosity=2)

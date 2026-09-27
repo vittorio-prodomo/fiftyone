@@ -64,11 +64,11 @@ def import_annotations(
     _fresh_import=False,
     **kwargs,
 ):
-    """Imports annotations from the specified CVAT project or task(s) into the
-    given sample collection.
+    """Imports annotations from the specified CVAT project, task(s), or job(s)
+    into the given sample collection.
 
-    Provide one of ``project_name``, ``project_id``, or ``task_ids`` to perform
-    an import.
+    Provide one of ``project_name``, ``project_id``, ``task_ids``, or
+    ``job_ids`` to perform an import.
 
     This method can be configured in any of the following three ways:
 
@@ -89,6 +89,11 @@ def import_annotations(
         project_name (None): the name of a CVAT project to import
         project_id (None): the ID of a CVAT project to import
         task_ids (None): a CVAT task ID or iterable of CVAT task IDs to import
+        job_ids (None): a CVAT job ID or iterable of CVAT job IDs to import.
+            Only the frames and annotations of these jobs are imported, and
+            later calls to
+            :meth:`load_annotations() <fiftyone.core.collections.SampleCollection.load_annotations>`
+            on the resulting run download only these jobs
         data_path (None): a parameter that defines the correspondence between
             the filenames in CVAT and the filepaths of ``sample_collection``.
             Can be any of the following:
@@ -141,8 +146,7 @@ def import_annotations(
         )
 
     n_sources = (
-        bool(project_name) + bool(project_id)
-        + bool(task_ids) + bool(job_ids)
+        bool(project_name) + bool(project_id) + bool(task_ids) + bool(job_ids)
     )
     if n_sources != 1:
         raise ValueError(
@@ -169,10 +173,11 @@ def import_annotations(
         task_ids = api.get_project_tasks(project_id)
 
     if job_ids is not None:
-        if etau.is_numeric(job_ids):
+        if etau.is_numeric(job_ids) or etau.is_str(job_ids):
             job_ids = [job_ids]
-        else:
-            job_ids = list(job_ids)
+
+        # CVAT reports job IDs as ints, so "123" would silently match nothing
+        job_ids = [int(job_id) for job_id in job_ids]
 
         _job_ids_filter = set(job_ids)
         _task_ids_for_jobs = set()
@@ -660,6 +665,7 @@ def _download_annotations(
         frame_id_map,
         labels_task_map,
         backend=anno_backend,
+        job_ids_filter=_job_ids_filter,
     )
 
     anno_backend.save_run_results(dataset, anno_key, results)
@@ -3742,6 +3748,7 @@ class CVATAnnotationResults(foua.AnnotationResults):
         frame_id_map,
         labels_task_map,
         backend=None,
+        job_ids_filter=None,
     ):
         super().__init__(samples, config, anno_key, id_map, backend=backend)
 
@@ -3751,6 +3758,12 @@ class CVATAnnotationResults(foua.AnnotationResults):
         self.job_ids = job_ids
         self.frame_id_map = frame_id_map
         self.labels_task_map = labels_task_map
+
+        # When only specific jobs were imported, the IDs of those jobs, so that
+        # downloads skip the task's other jobs
+        self.job_ids_filter = (
+            list(job_ids_filter) if job_ids_filter is not None else None
+        )
 
     def launch_editor(self):
         """Launches the CVAT editor and loads the first task for this
@@ -3928,6 +3941,7 @@ class CVATAnnotationResults(foua.AnnotationResults):
             job_ids,
             frame_id_map,
             d["labels_task_map"],
+            job_ids_filter=d.get("job_ids_filter", None),
         )
 
 
@@ -5090,11 +5104,10 @@ class CVATAnnotationAPI(foua.AnnotationAPI):
                     attr_type_map = None
 
                 job_ids = self._get_job_ids(task_id)
-                _job_ids_filter = getattr(results, "_job_ids_filter", None)
-                if _job_ids_filter is not None:
-                    job_ids = [
-                        j for j in job_ids if j in _job_ids_filter
-                    ]
+                job_ids_filter = getattr(results, "job_ids_filter", None)
+                if job_ids_filter is not None:
+                    job_ids_filter = set(job_ids_filter)
+                    job_ids = [j for j in job_ids if j in job_ids_filter]
                 label_fields = labels_task_map_rev[task_id]
                 label_types = self._get_return_label_types(
                     label_schema, label_fields
@@ -5134,8 +5147,10 @@ class CVATAnnotationAPI(foua.AnnotationAPI):
                         job_results = pool.starmap(
                             self._process_single_job, job_args
                         )
-                else:
+                elif job_args:
                     job_results = [self._process_single_job(*job_args[0])]
+                else:
+                    job_results = []
 
                 for job_result in job_results:
                     for label_field, label_field_results in job_result.items():
