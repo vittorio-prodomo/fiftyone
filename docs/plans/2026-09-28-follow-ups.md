@@ -106,9 +106,9 @@ unchanged for all of them except the first.
   broken on upstream `main`
 - **Bug**: `write_json()` / `to_dict()` serialize dates as extended JSON
   (`{"$date": "..."}`), but `deserialize_value()` in
-  `fiftyone/core/odm/utils.py` only turns `$oid` and `$binary` back into
-  Python objects. A custom `DateTimeField` or `DateField` (top-level, inside a
-  list, or as a label attribute) stays a dict, and `Dataset.from_json()` /
+  `fiftyone/core/odm/utils.py` only turns `$oid` and `$binary` back into Python
+  objects. A custom `DateTimeField` or `DateField` (top-level, inside a list,
+  or as a label attribute) stays a dict, and `Dataset.from_json()` /
   `from_dict()` fails with
   `ValueError: Invalid value for field 'capture_time'. Reason: Datetime fields must have datetime values`.
   Built-in `created_at` / `last_modified_at` are unaffected because they are
