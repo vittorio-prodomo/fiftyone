@@ -5885,6 +5885,35 @@ class DatasetSerializationTests(unittest.TestCase):
         self.assertEqual(sample2["foo"], "bar")
 
     @drop_datasets
+    def test_serialize_dataset_dates(self):
+        dt = datetime(2025, 5, 1, 12, 30, 15)
+        d = date(2025, 5, 1)
+        sample = fo.Sample(
+            filepath="image.jpg",
+            capture_time=dt,
+            capture_date=d,
+            times=[dt, dt + timedelta(hours=1)],
+            label=fo.Classification(label="cat", seen_at=dt),
+        )
+
+        dataset = fo.Dataset()
+        dataset.add_sample(sample)
+
+        with etau.TempDir() as tmp_dir:
+            json_path = os.path.join(tmp_dir, "dataset.json")
+            dataset.write_json(json_path)
+            dataset2 = fo.Dataset.from_json(json_path)
+
+        dataset3 = fo.Dataset.from_dict(dataset.to_dict())
+
+        for ds in (dataset2, dataset3):
+            sample2 = ds.first()
+            self.assertEqual(sample2.capture_time, dt)
+            self.assertEqual(sample2.capture_date, d)
+            self.assertListEqual(sample2.times, [dt, dt + timedelta(hours=1)])
+            self.assertEqual(sample2.label.seen_at, dt)
+
+    @drop_datasets
     def test_serialize_video_dataset(self):
         sample = fo.Sample(filepath="video.mp4", foo="bar")
         frame = fo.Frame(foo="bar")

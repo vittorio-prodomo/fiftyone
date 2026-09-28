@@ -100,6 +100,24 @@ unchanged for all of them except the first.
 - **Thread**:
   https://github.com/vittorio-prodomo/eta/pull/1#discussion_r4120744121
 
+### 7. `write_json()` output with custom date fields cannot be loaded (fiftyone)
+
+- **Status**: fixed in this fork (branch `fix/json-datetime-roundtrip`), still
+  broken on upstream `main`
+- **Bug**: `write_json()` / `to_dict()` serialize dates as extended JSON
+  (`{"$date": "..."}`), but `deserialize_value()` in
+  `fiftyone/core/odm/utils.py` only turns `$oid` and `$binary` back into
+  Python objects. A custom `DateTimeField` or `DateField` (top-level, inside a
+  list, or as a label attribute) stays a dict, and `Dataset.from_json()` /
+  `from_dict()` fails with
+  `ValueError: Invalid value for field 'capture_time'. Reason: Datetime fields must have datetime values`.
+  Built-in `created_at` / `last_modified_at` are unaffected because they are
+  reset on insert.
+- **Fix**: decode `$date` dicts with `json_util` in `deserialize_value()`; test
+  `DatasetSerializationTests.test_serialize_dataset_dates` in
+  `tests/unittests/dataset_tests.py`
+- **Next step**: open an upstream PR with the fix and the test
+
 ## Tiles follow-ups
 
 The tiles view (`fiftyone/core/tiles.py`, `ToTiles`, and the "Preview tiling"

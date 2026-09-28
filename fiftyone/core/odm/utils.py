@@ -111,6 +111,10 @@ def deserialize_value(value):
         if "$oid" in value:
             return ObjectId(value["$oid"])
 
+        if "$date" in value:
+            # Serialized date/datetime in extended format
+            return json_util.loads(json.dumps(value))
+
         return value
 
     if isinstance(value, bytes):
