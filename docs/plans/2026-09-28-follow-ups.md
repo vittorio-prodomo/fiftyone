@@ -15,8 +15,8 @@ linked PR threads.
 - PRs into `main` run upstream's full CI (`build`, `test`, `test-windows`,
   `e2e`). A PR that changes `setup.py`'s `VERSION` needs the `version-bump`
   label.
-- The dependency pins the forks need locally (`graphql-core<3.3`, and overrides
-  for fiftyone's `fiftyone-brain` and `voxel51-eta` pins) are in the cloud
+- `graphql-core<3.3` is capped in `setup.py` (see item 8). The overrides for
+  fiftyone's `fiftyone-brain` and `voxel51-eta` pins are in the cloud
   environment's setup script.
 
 ## Upstream contributions
@@ -117,6 +117,19 @@ unchanged for all of them except the first.
   `DatasetSerializationTests.test_serialize_dataset_dates` in
   `tests/unittests/dataset_tests.py`
 - **Next step**: open an upstream PR with the fix and the test
+
+### 8. strawberry fails to import with graphql-core 3.3 (fiftyone)
+
+- **Status**: worked around in this fork (`graphql-core>=3.2,<3.3` in
+  `setup.py`), still unpinned on upstream `main`
+- **Bug**: `strawberry-graphql` 0.316.0 declares `graphql-core>=3.2.0,<3.4.0`,
+  but imports `graphql.execution.ExecutionContext`, which graphql-core 3.3.0
+  removed. A fresh install resolves graphql-core 3.3.0 and `import fiftyone`
+  fails with
+  `ImportError: cannot import name 'ExecutionContext' from 'graphql.execution'`.
+  It broke the `test-windows` jobs on every PR into `main`.
+- **Next step**: decide whether to report it upstream (to fiftyone, strawberry,
+  or both)
 
 ## Tiles follow-ups
 
