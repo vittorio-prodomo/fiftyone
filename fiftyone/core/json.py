@@ -5,6 +5,7 @@ FiftyOne JSON handling
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 import dataclasses
 from datetime import date, datetime
 import math
@@ -13,7 +14,6 @@ from bson import ObjectId
 import numpy as np
 
 import fiftyone.core.utils as fou
-
 
 _MASK_CLASSES = {"Detection", "Heatmap", "Segmentation"}
 
@@ -84,7 +84,7 @@ def stringify(d, _cls=None):
         try:
             # historically, bytes were used for numpy arrays
             return _handle_numpy_array(d, _cls)
-        except:
+        except Exception:
             # with plugins, bytes can represent other data, omit for non
             return str(d)
 

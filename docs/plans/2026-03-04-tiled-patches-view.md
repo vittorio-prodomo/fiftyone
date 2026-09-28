@@ -21,8 +21,8 @@ labels on patches correctly — only need to wire `zoomPad` to a UI slider.
 
 **Files:**
 
--   Create: `fiftyone/core/tiles.py`
--   Test: `tests/unittests/tiles_tests.py`
+- Create: `fiftyone/core/tiles.py`
+- Test: `tests/unittests/tiles_tests.py`
 
 **Step 1: Write the failing test**
 
@@ -233,13 +233,13 @@ git commit -m "feat: add tile grid generation utility"
 
 **Files:**
 
--   Modify: `fiftyone/core/stages.py:8241` (insert `ToTiles` class after
-    `ToPatches`)
--   Modify: `fiftyone/core/stages.py:9327` (add `ToTiles` to `_STAGES` list)
--   Modify: `fiftyone/core/collections.py:8172` (add `to_tiles()` method after
-    `to_patches()`)
--   Modify: `fiftyone/__public__.py:249` (export `ToTiles`)
--   Test: `tests/unittests/tiles_tests.py` (add integration test class)
+- Modify: `fiftyone/core/stages.py:8241` (insert `ToTiles` class after
+  `ToPatches`)
+- Modify: `fiftyone/core/stages.py:9327` (add `ToTiles` to `_STAGES` list)
+- Modify: `fiftyone/core/collections.py:8172` (add `to_tiles()` method after
+  `to_patches()`)
+- Modify: `fiftyone/__public__.py:249` (export `ToTiles`)
+- Test: `tests/unittests/tiles_tests.py` (add integration test class)
 
 **Step 1: Write the failing test**
 
@@ -709,12 +709,12 @@ git commit -m "feat: add ToTiles view stage and to_tiles() method"
 
 **Files:**
 
--   Modify: `app/packages/state/src/recoil/atoms.ts:73` (add `zoomPad` atom)
--   Modify: `app/packages/state/src/recoil/looker.ts:107` (wire `zoomPad` into
-    options)
--   Modify:
-    `app/packages/core/src/components/Actions/Options/Options.tsx:66-84,437`
-    (add ZoomPad control)
+- Modify: `app/packages/state/src/recoil/atoms.ts:73` (add `zoomPad` atom)
+- Modify: `app/packages/state/src/recoil/looker.ts:107` (wire `zoomPad` into
+  options)
+- Modify:
+  `app/packages/core/src/components/Actions/Options/Options.tsx:66-84,437` (add
+  ZoomPad control)
 
 **Step 1: Add `zoomPad` Recoil atom**
 
@@ -814,7 +814,7 @@ git commit -m "feat: add zoomPad slider to grid options for patches views"
 
 **Files:**
 
--   Test: `tests/unittests/tiles_tests.py` (add end-to-end-style test)
+- Test: `tests/unittests/tiles_tests.py` (add end-to-end-style test)
 
 **Step 1: Add an integration test**
 
@@ -922,7 +922,7 @@ git commit -m "test: add integration tests for to_tiles"
 
 **Files:**
 
--   Modify: `fiftyone/core/stages.py` (add cleanup in `ToTiles.load_view`)
+- Modify: `fiftyone/core/stages.py` (add cleanup in `ToTiles.load_view`)
 
 **Step 1: Add cleanup logic**
 

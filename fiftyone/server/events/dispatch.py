@@ -14,6 +14,7 @@ import fiftyone.core.context as focx
 import fiftyone.core.odm as foo
 from fiftyone.core.session.events import (
     add_screenshot,
+    AppCountUpdate,
     CaptureNotebookCell,
     DeactivateNotebookCell,
     ReactivateNotebookCell,
@@ -24,12 +25,19 @@ from fiftyone.core.session.events import (
     SetColorScheme,
     SetGroupSlice,
     SetSample,
+    SetLabelSelectionStyle,
+    SetSampleSelectionStyle,
     SetSpaces,
     StateUpdate,
     SetFieldVisibilityStage,
 )
 
-from fiftyone.server.events.state import get_listeners, get_state, set_state
+from fiftyone.server.events.state import (
+    get_app_count,
+    get_listeners,
+    get_state,
+    set_state,
+)
 
 
 async def dispatch_event(
@@ -53,7 +61,7 @@ async def dispatch_event(
         state.selected_labels = event.labels
 
     if isinstance(event, SelectSamples):
-        state.selected = event.sample_ids
+        state.selected_samples = event.samples
 
     if isinstance(event, SetColorScheme):
         state.color_scheme = foo.ColorScheme.from_dict(
@@ -69,6 +77,12 @@ async def dispatch_event(
 
     if isinstance(event, SetFieldVisibilityStage):
         state.field_visibility_stage = event.stage
+
+    if isinstance(event, SetSampleSelectionStyle):
+        state.sample_selection_style = event.style
+
+    if isinstance(event, SetLabelSelectionStyle):
+        state.label_selection_style = event.style
 
     if isinstance(event, SetGroupSlice):
         state.group_slice = event.slice or state.dataset.default_group_slice
@@ -86,3 +100,19 @@ async def dispatch_event(
         listener.queue.put_nowait((datetime.now(), event))
 
     return event
+
+
+def dispatch_app_count() -> None:
+    """Dispatch the current App count to all listeners registered for the
+    server process.
+
+    Listener queues are last-in first-out, so a listener with an unread count
+    could otherwise receive the newest count before an older one. Only the
+    latest count matters, so any unread count is replaced.
+    """
+    event = AppCountUpdate(count=get_app_count())
+    for listener in get_listeners()[event.get_event_name()]:
+        while not listener.queue.empty():
+            listener.queue.get_nowait()
+
+        listener.queue.put_nowait((datetime.now(), event))

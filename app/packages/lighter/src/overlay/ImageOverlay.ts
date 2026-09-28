@@ -6,13 +6,7 @@ import { type EventDispatcher, getEventBus } from "@fiftyone/events";
 import { getSampleSrc } from "@fiftyone/state";
 import type { LighterEventGroup } from "../events";
 import type { Renderer2D } from "../renderer/Renderer2D";
-import type {
-  BoundedOverlay,
-  CanonicalMedia,
-  Dimensions,
-  Rect,
-  RenderMeta,
-} from "../types";
+import type { CanonicalMedia, Dimensions, Rect, RenderMeta } from "../types";
 import { BaseOverlay } from "./BaseOverlay";
 
 /**
@@ -36,10 +30,7 @@ const isRectNonEmpty = (bounds: Rect | undefined): boolean => {
  * Uses an HTML <img> element instead of Pixi textures to avoid CORS requirements.
  * Also implements CanonicalMedia for coordinate transformations.
  */
-export class ImageOverlay
-  extends BaseOverlay
-  implements BoundedOverlay, CanonicalMedia
-{
+export class ImageOverlay extends BaseOverlay implements CanonicalMedia {
   private imgElement?: HTMLImageElement;
   private originalDimensions?: Dimensions;
   private currentBounds?: Rect;
@@ -66,7 +57,7 @@ export class ImageOverlay
   setEventChannel(eventChannel: string | undefined): void {
     super.setEventChannel(eventChannel);
 
-    // Clean up previous subscription
+    // Clean up previous subscriptions
     if (this.viewportUnsubscribe) {
       this.viewportUnsubscribe();
       this.viewportUnsubscribe = undefined;
@@ -80,7 +71,7 @@ export class ImageOverlay
         "lighter:viewport-moved",
         (event) => {
           this.updateImageTransform(event.x, event.y, event.scale);
-        }
+        },
       );
     }
   }
@@ -128,6 +119,18 @@ export class ImageOverlay
   }
 
   /**
+   * Returns the container dimensions by reading directly from the DOM.
+   * This is the authoritative source of truth for container dimensions.
+   */
+  private getContainerDimensionsFromDom(): { width: number; height: number } {
+    const parent = this.renderer?.getCanvas().parentElement;
+    if (parent) {
+      return { width: parent.clientWidth, height: parent.clientHeight };
+    }
+    return { width: 0, height: 0 };
+  }
+
+  /**
    * Creates the HTML image element and appends it to the container.
    * @param container - The container element to append the image to.
    */
@@ -145,8 +148,10 @@ export class ImageOverlay
       this.emitError(new Error(`Invalid sample source: ${this.options.src}`));
       return;
     }
+
     this.imgElement.src = src;
 
+    this.imgElement.style.imageRendering = "pixelated";
     this.imgElement.style.position = "absolute";
     this.imgElement.style.top = "0";
     this.imgElement.style.left = "0";
@@ -175,9 +180,8 @@ export class ImageOverlay
         };
         this.isImageLoaded = true;
 
-        // Trigger initial layout
-        if (this.renderer) {
-          const dims = this.renderer.getContainerDimensions();
+        const dims = this.getContainerDimensionsFromDom();
+        if (dims.width && dims.height) {
           this.handleResize(dims.width, dims.height);
         }
 
@@ -212,7 +216,7 @@ export class ImageOverlay
   private updateImageTransform(
     viewportX: number,
     viewportY: number,
-    scale: number
+    scale: number,
   ): void {
     if (!this.imgElement || !this.isImageLoaded) return;
 
@@ -273,10 +277,7 @@ export class ImageOverlay
     return this.id;
   }
 
-  protected async renderImpl(
-    renderer: Renderer2D,
-    _renderMeta: RenderMeta
-  ): Promise<void> {
+  protected renderImpl(renderer: Renderer2D, _renderMeta: RenderMeta): void {
     // The image is rendered via the HTML <img> element, not through Pixi.
     if (
       this.imgElement &&
@@ -284,8 +285,10 @@ export class ImageOverlay
       renderer.isReady() &&
       (!this.currentBounds || !isRectNonEmpty(this.currentBounds))
     ) {
-      const dims = renderer.getContainerDimensions();
-      this.handleResize(dims.width, dims.height);
+      const dims = this.getContainerDimensionsFromDom();
+      if (dims.width && dims.height) {
+        this.handleResize(dims.width, dims.height);
+      }
     }
 
     if (this.isImageLoaded) {
@@ -367,7 +370,7 @@ export class ImageOverlay
    */
   updateBounds(): void {
     if (this.renderer) {
-      const containerDimensions = this.renderer.getContainerDimensions();
+      const containerDimensions = this.getContainerDimensionsFromDom();
       if (
         containerDimensions &&
         containerDimensions.width > 0 &&
@@ -395,7 +398,8 @@ export class ImageOverlay
    * Emit canonical media bounds changed event.
    */
   private notifyBoundsChanged(): void {
-    if (!this.currentBounds || !this.sceneEventBus) return;
+    if (!this.currentBounds || !this.sceneEventBus || !this.isImageLoaded)
+      return;
 
     this.sceneEventBus.dispatch("lighter:canonical-media-bounds-changed", {
       bounds: this.currentBounds,

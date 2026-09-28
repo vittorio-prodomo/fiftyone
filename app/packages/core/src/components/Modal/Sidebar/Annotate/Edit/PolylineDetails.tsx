@@ -1,30 +1,94 @@
+import {
+  useAnnotationEngine,
+  useEngineSelector,
+  useSceneSampleId,
+} from "@fiftyone/annotation";
 import * as fos from "@fiftyone/state";
 import { Box, Typography } from "@mui/material";
-import { useAtomValue } from "jotai";
 import { useMemo } from "react";
-import { currentData } from "./state";
+import { useAnnotationContext } from "./useAnnotationContext";
+import type { Coordinates } from "@fiftyone/looker/src/state";
+
+/**
+ * Counts the number of segments in the coordinates matrix.
+ *
+ * Coordinates are expressed in the form
+ * ```typescript
+ * [
+ *   // segment 0
+ *   [vertex0, vertex1, vertex2],
+ *   // segment 1
+ *   [vertex3, vertex4],
+ *   // ...
+ * ]
+ * ```
+ * @param points Coordinate array
+ */
+const countSegments = (points: Coordinates[][] | undefined): number => {
+  return points?.length ?? 0;
+};
+
+/**
+ * Counts the number of vertices in the coordinates matrix.
+ *
+ * Coordinates are expressed in the form
+ * ```typescript
+ * [
+ *   // segment 0
+ *   [vertex0, vertex1, vertex2],
+ *   // segment 1
+ *   [vertex3, vertex4],
+ *   // ...
+ * ]
+ * ```
+ * @param points Coordinate array
+ */
+const countVertices = (points: Coordinates[][] | undefined): number => {
+  return (
+    points?.reduce((total, segment) => {
+      return total + segment.length;
+    }, 0) ?? 0
+  );
+};
 
 export const PolylineDetails = () => {
-  const currentDataValue = useAtomValue(
-    currentData
-  ) as fos.PolylineAnnotationLabel["data"];
+  const { selected } = useAnnotationContext();
+  const currentDataValue = selected?.data as
+    | fos.PolylineAnnotationLabel["data"]
+    | null;
+
+  // committed geometry read reactively from the engine (cf. Position3d) — a
+  // 3D vertex edit commits there immediately, while a draft's `data` snapshot
+  // is frozen at creation. Pre-commit drafts fall back to the snapshot.
+  const engine = useAnnotationEngine();
+  const sample = useSceneSampleId();
+  const field = selected?.field ?? null;
+  const labelId = (currentDataValue?._id as string | undefined) ?? "";
+  const committed = useEngineSelector(
+    engine,
+    (e) =>
+      labelId && field && sample
+        ? (e.getLabel({ sample, path: field, instanceId: labelId }) as
+            | fos.PolylineAnnotationLabel["data"]
+            | undefined)
+        : undefined,
+    // only the vertex data feeds the counts — re-render on geometry changes,
+    // not on every engine version bump
+    (a, b) =>
+      a === b ||
+      (a?._id === b?._id &&
+        a?.points3d === b?.points3d &&
+        a?.points === b?.points),
+  );
 
   const { segmentCount, vertexCount } = useMemo(() => {
-    if (!currentDataValue?.points3d) {
-      return { segmentCount: 0, vertexCount: 0 };
-    }
-
-    const segments = currentDataValue.points3d?.length ?? 0;
-    const totalVertices =
-      currentDataValue.points3d?.reduce((total, segment) => {
-        return total + segment.length;
-      }, 0) ?? 0;
-
+    const source = committed ?? currentDataValue;
+    const points = source?.points3d ?? source?.points;
     return {
-      segmentCount: segments,
-      vertexCount: totalVertices,
+      segmentCount: countSegments(points),
+      vertexCount: countVertices(points),
     };
-  }, [currentDataValue]);
+  }, [committed, currentDataValue]);
 
   return (
     <Box sx={{ px: 1.5, py: 1 }}>

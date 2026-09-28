@@ -5,11 +5,11 @@ Wrapper around pytest that cleans up subprocesses.
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 import sys
 
 import psutil
 import pytest
-
 
 try:
     code = pytest.main(sys.argv[1:])

@@ -15,10 +15,10 @@ import { ReactSortable } from "react-sortablejs";
 import { useSetRecoilState } from "recoil";
 import PillButton from "../PillButton";
 import PopoutButton from "../PopoutButton";
-import { SHOW_MORE_ACTIONS_BUTTON_WIDTH, hideOverflowingNodes } from "./utils";
+import { hideOverflowingNodes } from "./utils";
 
 export default function AdaptiveMenu<T extends AdaptiveMenuItemPropsType>(
-  props: AdaptiveMenuPropsType<T>
+  props: AdaptiveMenuPropsType<T>,
 ) {
   const {
     id,
@@ -36,10 +36,13 @@ export default function AdaptiveMenu<T extends AdaptiveMenuItemPropsType>(
   const pendingMoveRef = useRef<Array<number>>([]);
 
   const itemsById = useMemo(() => {
-    return items.reduce((itemsById, item, index) => {
-      itemsById[item.id] = { ...item, index };
-      return itemsById;
-    }, {} as Record<string, AdaptiveMenuItemPropsType>);
+    return items.reduce(
+      (itemsById, item, index) => {
+        itemsById[item.id] = { ...item, index };
+        return itemsById;
+      },
+      {} as Record<string, AdaptiveMenuItemPropsType>,
+    );
   }, [items]);
 
   const computedItems = previewItems || items;
@@ -52,28 +55,29 @@ export default function AdaptiveMenu<T extends AdaptiveMenuItemPropsType>(
     onOrderChange?.(updatedItems);
   };
 
-  function autoFitNodes() {
+  const autoFitNodes = useCallback(() => {
     const containerElem = containerRef.current;
-    if (!containerElem) return;
-    hideOverflowingNodes(containerElem, (_: number, lastVisibleItemId) => {
+    if (!containerElem) return undefined;
+    hideOverflowingNodes(containerElem, (hiddenCount, lastVisibleItemId) => {
       const lastVisibleItem = itemsById[lastVisibleItemId];
-      if (lastVisibleItem?.index) {
-        const computedHidden = items.length - lastVisibleItem.index - 1;
-        setHidden(computedHidden);
-      }
+      setHidden(
+        hiddenCount === 0
+          ? 0
+          : items.length - ((lastVisibleItem?.index ?? -1) + 1),
+      );
     });
-  }
-
-  const ro = useMemo(() => {
-    return new ResizeObserver(autoFitNodes);
-  }, []);
+  }, [items, itemsById]);
 
   useLayoutEffect(() => {
-    const containerElem = containerRef?.current;
-    if (containerElem) {
-      ro.observe(containerElem);
-    }
-  }, [ro, containerRef.current]); // eslint-disable-line
+    const containerElem = containerRef.current;
+    if (!containerElem) return undefined;
+
+    // Operator placements can arrive after the row mounts without resizing it.
+    autoFitNodes();
+    const ro = new ResizeObserver(autoFitNodes);
+    ro.observe(containerElem);
+    return () => ro.disconnect();
+  }, [autoFitNodes]);
 
   const handleMove = useMemo(() => {
     return throttle((e: MoveEvent) => {
@@ -210,7 +214,7 @@ export default function AdaptiveMenu<T extends AdaptiveMenuItemPropsType>(
 }
 
 function AdaptiveMenuItems<T extends AdaptiveMenuItemPropsType>(
-  props: AdaptiveMenuItemsPropsType<T>
+  props: AdaptiveMenuItemsPropsType<T>,
 ) {
   const { items, variant, closeOverflow, refresh } = props;
   return items.map((item) => {
@@ -228,7 +232,7 @@ function AdaptiveMenuItems<T extends AdaptiveMenuItemPropsType>(
 }
 
 function MoreItems<T extends AdaptiveMenuItemPropsType>(
-  props: MoreItemsPropsType<T>
+  props: MoreItemsPropsType<T>,
 ) {
   const { id, items, onMove, onEnd, onStart, orientation, refresh } = props;
   const [open, setOpen] = React.useState(false);
@@ -265,7 +269,8 @@ function MoreItems<T extends AdaptiveMenuItemPropsType>(
           }}
           icon={<ExpandMore />}
           title="More items"
-          highlight
+          open={open}
+          highlight={open}
         />
       }
       open={open}

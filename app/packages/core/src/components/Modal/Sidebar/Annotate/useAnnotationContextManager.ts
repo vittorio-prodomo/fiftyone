@@ -1,102 +1,78 @@
-import { useSampleMutationManager } from "@fiftyone/annotation";
+import {
+  type AnnotationContextManager,
+  type EnterResult,
+  InitializationStatus,
+  useSetEntranceLabel,
+} from "@fiftyone/annotation";
 import {
   type ContextManager,
   DefaultContextManager,
   useActiveModalFields,
+  useModalSample,
   useQueryPerformanceSampleLimit,
+  useUnboundStateRef,
 } from "@fiftyone/state";
-import { atom, useAtom, useAtomValue } from "jotai";
+import { atom, useAtomValue } from "jotai";
+import { jotaiStore } from "@fiftyone/state/src/jotai";
 import { useCallback, useMemo } from "react";
 import { usePrimitiveController } from "./Edit/useActivePrimitive";
 import useSave from "./Edit/useSave";
 import { useAnnotationSchemaContext } from "./state";
 import useCanManageSchema from "./useCanManageSchema";
-import { useSchemaManager } from "./useSchemaManager";
+import { useDeactivateAllModes } from "./useDeactivateAllModes";
+import {
+  schemaManagementOpsAtom,
+  useSchemaResolver,
+} from "./useSchemaResolver";
 
-/**
- * Status code when attempting to initialize annotation schema.
- */
-export enum InitializationStatus {
-  InsufficientPermissions,
-  ServerError,
-  Success,
-}
-
-/**
- * Result type when attempting to enter annotation context.
- */
-export type EnterResult = {
-  status: InitializationStatus;
-  message?: string;
-};
-
-/**
- * Manager which provides methods for stateful entry-into and exit-from annotation mode.
- */
-export interface AnnotationContextManager {
-  /**
-   * Enter annotation mode, performing any required setup for the specified `path`.
-   *
-   * If a {@link FieldSchema} does not exist for the specified `path`,
-   * one will be created automatically.
-   *
-   * The modal's active paths will be updated to only include the specified `path`.
-   *
-   * If a `labelId` is provided,
-   * that label instance will be opened for editing in the annotation sidebar.
-   *
-   * @param path The path to the sample field
-   * @param labelId The ID of the active label
-   */
-  enter: (path?: string, labelId?: string) => Promise<EnterResult>;
-
-  /**
-   * Exit annotation mode, restoring the previous state in explore mode.
-   *
-   * Any active paths which were set before calling {@link enter} will be restored.
-   */
-  exit: () => void;
-
-  /**
-   * The label ID which triggered entrance into annotation.
-   *
-   * todo - this is required due to some chicken-and-egg behavior with renderer
-   *  and label init; we should move all annotation init logic into this
-   *  context manager and remove this.
-   */
-  entranceLabelId: string | null;
-
-  /**
-   * Clear the entrance label ID value.
-   *
-   * todo - this is required due to some chicken-and-egg behavior with renderer
-   *  and label init; we should move all annotation init logic into this
-   *  context manager and remove this.
-   */
-  clearEntranceLabelId: () => void;
-}
+// the contract (and the entrance-label state) live in @fiftyone/annotation;
+// this module provides the app-layer implementation
+export {
+  type AnnotationContextManager,
+  type EnterResult,
+  InitializationStatus,
+  useSetEntranceLabel,
+} from "@fiftyone/annotation";
 
 const contextManagerAtom = atom<ContextManager>(new DefaultContextManager());
-const activeLabelIdAtom = atom<string | null>(null);
 
 /**
- * Hook which provides an {@link AnnotationContextManager}.
+ * Hook which provides the {@link AnnotationContextManager} implementation.
+ *
+ * Register it for package-level consumers (the annotation controller) via
+ * `useRegisterAnnotationContextManager` — see `SchemaManagerOutlet`.
  */
 export const useAnnotationContextManager = (): AnnotationContextManager => {
   const contextManager = useAtomValue(contextManagerAtom);
-  const [activeLabelId, setActiveLabelId] = useAtom(activeLabelIdAtom);
+  const setEntranceLabel = useSetEntranceLabel();
   const saveChanges = useSave();
 
   const [activeFields, setActiveFields] = useActiveModalFields();
   const { setLabelSchema, setActiveSchemaPaths } = useAnnotationSchemaContext();
-  const schemaManager = useSchemaManager();
   const sampleScanLimit = useQueryPerformanceSampleLimit();
   const canManageSchema = useCanManageSchema();
+  const schemaResolver = useSchemaResolver();
   const { isPrimitive, setActivePrimitive } = usePrimitiveController();
-  const { reset: clearStaleMutations } = useSampleMutationManager();
+  // the modal's sample id — the same id the engine's store registers
+  // under; the store itself isn't registered yet on explore-tab entry
+  const modalSampleId = useModalSample()?.sample?._id;
+  // Held in a ref so exit() invokes the most recent deactivator chain
+  // even when the captured `exit` closure was snapshotted at mount.
+  const deactivateAllModesRef = useUnboundStateRef(useDeactivateAllModes());
 
-  const initializeFieldSchema = useCallback(
-    async (field: string) => {
+  const activateField = useCallback(
+    async (field: string): Promise<EnterResult> => {
+      // Read management ops from the store at execution time to avoid
+      // stale closure — the atom may be set by SchemaManagementProvider's
+      // effect after this callback was created.
+      const mgmtOps = jotaiStore.get(schemaManagementOpsAtom);
+
+      if (!canManageSchema || !mgmtOps) {
+        return {
+          status: InitializationStatus.InsufficientPermissions,
+        };
+      }
+
       // activate only the specified field
       setActiveFields([field]);
 
@@ -107,32 +83,28 @@ export const useAnnotationContextManager = (): AnnotationContextManager => {
       // create and activate the field schema
       try {
         // check for existing schema
-        let listSchemaResponse = await schemaManager.listSchemas({});
+        let listSchemaResponse = await schemaResolver.listSchemas({});
 
         // if it doesn't exist, create it
         if (!listSchemaResponse.label_schemas[field]?.label_schema) {
-          if (!canManageSchema) {
-            setLabelSchema(listSchemaResponse.label_schemas);
-            return {
-              status: InitializationStatus.InsufficientPermissions,
-            };
-          }
-
-          await schemaManager.initializeSchema({
+          await mgmtOps.initializeSchema({
             field,
             scan_samples: true,
             limit: sampleScanLimit,
           });
         }
 
-        if (canManageSchema) {
-          await schemaManager.activateSchemas({ fields: [field] });
-        }
+        await mgmtOps.activateSchemas({ fields: [field] });
 
         // refresh annotation state
-        listSchemaResponse = await schemaManager.listSchemas({});
+        listSchemaResponse = await schemaResolver.listSchemas({});
         setLabelSchema(listSchemaResponse.label_schemas);
         setActiveSchemaPaths(listSchemaResponse.active_label_schemas);
+
+        // if the field is a primitive, activate it directly
+        if (isPrimitive(field)) {
+          setActivePrimitive(field);
+        }
 
         return {
           status: InitializationStatus.Success,
@@ -147,12 +119,14 @@ export const useAnnotationContextManager = (): AnnotationContextManager => {
     },
     [
       canManageSchema,
+      isPrimitive,
       sampleScanLimit,
-      schemaManager,
+      schemaResolver,
       setActiveFields,
+      setActivePrimitive,
       setActiveSchemaPaths,
       setLabelSchema,
-    ]
+    ],
   );
 
   const enter = useCallback(
@@ -178,49 +152,45 @@ export const useAnnotationContextManager = (): AnnotationContextManager => {
 
       // initialize and activate field schema if specified
       if (field) {
-        result = await initializeFieldSchema(field);
-
-        // if the field is a primitive, activate it directly
-        if (
-          result.status === InitializationStatus.Success &&
-          isPrimitive(field)
-        ) {
-          setActivePrimitive(field);
-        }
+        result = await activateField(field);
       }
 
-      if (labelId) {
-        setActiveLabelId(labelId);
+      // the entrance payload is a complete ref captured here at the
+      // dispatch site — consumers apply what they were told
+      if (labelId && field && modalSampleId) {
+        setEntranceLabel({
+          sample: modalSampleId,
+          path: field,
+          instanceId: labelId,
+        });
       }
 
       return result;
     },
     [
+      activateField,
       activeFields,
       contextManager,
-      initializeFieldSchema,
-      isPrimitive,
+      modalSampleId,
       setActiveFields,
-      setActiveLabelId,
-      setActivePrimitive,
-    ]
+      setEntranceLabel,
+    ],
   );
 
   const exit = useCallback(() => {
     if (contextManager.isActive()) {
       saveChanges();
-      clearStaleMutations();
+      deactivateAllModesRef.current();
       contextManager.exit();
     }
-  }, [clearStaleMutations, contextManager, saveChanges]);
+  }, [contextManager, deactivateAllModesRef, saveChanges]);
 
   return useMemo(
     () => ({
-      clearEntranceLabelId: () => setActiveLabelId(null),
+      activateField,
       enter,
-      entranceLabelId: activeLabelId,
       exit,
     }),
-    [activeLabelId, enter, exit, setActiveLabelId]
+    [activateField, enter, exit],
   );
 };

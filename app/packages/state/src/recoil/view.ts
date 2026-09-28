@@ -1,5 +1,8 @@
 import {
   datasetFragment,
+  expressionCatalogFragment,
+  expressionCatalogFragment$data,
+  expressionCatalogFragment$key,
   graphQLSyncFragmentAtom,
   stageDefinitionsFragment,
   stageDefinitionsFragment$data,
@@ -21,7 +24,24 @@ export const stageDefinitions = graphQLSyncFragmentAtom<
     },
     default: [],
   },
-  { key: "stageDefinitions" }
+  { key: "stageDefinitions" },
+);
+
+/**
+ * The server's description of view expressions: every operator with its
+ * kinds and docstring summary, the kind of value each field type holds, and
+ * the AST version both sides must agree on to exchange an envelope.
+ */
+export const expressionCatalog = graphQLSyncFragmentAtom<
+  expressionCatalogFragment$key,
+  expressionCatalogFragment$data | null
+>(
+  {
+    fragments: [expressionCatalogFragment],
+    read: (data) => data,
+    default: null,
+  },
+  { key: "expressionCatalog" },
 );
 
 export const view = graphQLSyncFragmentAtom<viewFragment$key, State.Stage[]>(
@@ -41,12 +61,15 @@ export const view = graphQLSyncFragmentAtom<viewFragment$key, State.Stage[]>(
 
       if (Array.isArray(newView) && Array.isArray(current)) {
         // if 'seed' changes in a Take stage, clear '_rand'
-        const oldTakes = current.reduce((acc, cur) => {
-          if (cur._cls === TAKE_VIEW_STAGE && cur._uuid) {
-            acc[cur._uuid] = cur;
-          }
-          return acc;
-        }, {} as { [key: string]: State.Stage });
+        const oldTakes = current.reduce(
+          (acc, cur) => {
+            if (cur._cls === TAKE_VIEW_STAGE && cur._uuid) {
+              acc[cur._uuid] = cur;
+            }
+            return acc;
+          },
+          {} as { [key: string]: State.Stage },
+        );
 
         newView.forEach((stage) => {
           if (stage._cls !== TAKE_VIEW_STAGE) return;
@@ -65,7 +88,7 @@ export const view = graphQLSyncFragmentAtom<viewFragment$key, State.Stage[]>(
   },
   {
     key: "view",
-  }
+  },
 );
 
 export const viewCls = graphQLSyncFragmentAtom<
@@ -80,7 +103,7 @@ export const viewCls = graphQLSyncFragmentAtom<
   },
   {
     key: "viewCls",
-  }
+  },
 );
 
 export const viewName = graphQLSyncFragmentAtom<
@@ -96,7 +119,7 @@ export const viewName = graphQLSyncFragmentAtom<
   },
   {
     key: "viewName",
-  }
+  },
 );
 
 export const isRootView = selector<boolean>({
@@ -112,7 +135,8 @@ const CLIPS_VIEW = "fiftyone.core.clips.ClipsView";
 const FRAMES_VIEW = "fiftyone.core.video.FramesView";
 const EVALUATION_PATCHES_VIEW = "fiftyone.core.patches.EvaluationPatchesView";
 const PATCHES_VIEW = "fiftyone.core.patches.PatchesView";
-const PATCH_VIEWS = [PATCHES_VIEW, EVALUATION_PATCHES_VIEW];
+const TILES_VIEW = "fiftyone.core.tiles.TilesView";
+const PATCH_VIEWS = [PATCHES_VIEW, EVALUATION_PATCHES_VIEW, TILES_VIEW];
 
 export const GROUP_BY_VIEW_STAGE = "fiftyone.core.stages.GroupBy";
 export const LIMIT_VIEW_STAGE = "fiftyone.core.stages.Limit";
@@ -254,4 +278,53 @@ export type DatasetViewOption = Pick<
 export const selectedSavedViewState = atom<DatasetViewOption | null>({
   key: "selectedSavedViewState",
   default: DEFAULT_SELECTED,
+});
+
+/**
+ * Helper to extract a kwarg value from a view stage's kwargs array.
+ * kwargs are stored as arrays of [key, value] tuples.
+ */
+export const getStageKwarg = <T>(
+  stage: State.Stage,
+  key: string,
+): T | undefined => {
+  const kwarg = stage.kwargs?.find(([k]) => k === key);
+  return kwarg ? (kwarg[1] as T) : undefined;
+};
+
+/**
+ * Extracts the generated dataset name from the view stages.
+ * Generated views (patches, clips, frames) store their dataset info in the
+ * `_state` kwarg of the view stage that created them (e.g., ToPatches, ToClips).
+ */
+export const generatedDatasetName = selector<string | undefined>({
+  key: "generatedDatasetName",
+  get: ({ get }) => {
+    if (!get(isGeneratedView)) {
+      return undefined;
+    }
+
+    const stages = get(view);
+    for (const stage of stages) {
+      const state = getStageKwarg<{ name?: string }>(stage, "_state");
+      if (state?.name) {
+        return state.name;
+      }
+    }
+
+    return undefined;
+  },
+  cachePolicy_UNSTABLE: {
+    eviction: "most-recent",
+  },
+});
+
+/**
+ * A view change in flight outside the router's knowledge — a server-side
+ * operator that applies a view when it finishes. Read through
+ * `useViewChangePending`; the router clears it when the next entry loads.
+ */
+export const viewChangePending = atom<boolean>({
+  key: "viewChangePending",
+  default: false,
 });

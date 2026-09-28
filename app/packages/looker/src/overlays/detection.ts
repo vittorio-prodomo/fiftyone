@@ -1,15 +1,18 @@
 /**
  * Copyright 2017-2026, Voxel51, Inc.
  */
-import { NONFINITES } from "@fiftyone/utilities";
-
 import {
   currentModalUniqueIdJotaiAtom,
   isHoveringParticularLabelWithInstanceConfig,
   jotaiStore,
 } from "@fiftyone/state/src/jotai";
+import {
+  getRotatedBoxCorners,
+  getRotation2d,
+  isPointInRotatedBox,
+} from "@fiftyone/utilities";
 import { INFO_COLOR } from "../constants";
-import { BaseState, BoundingBox, Coordinates, NONFINITE } from "../state";
+import { BaseState, BoundingBox, Coordinates } from "../state";
 import { distanceFromLineSegment } from "../util";
 import { RENDER_STATUS_PAINTED, RENDER_STATUS_PENDING } from "../worker/shared";
 import {
@@ -19,7 +22,13 @@ import {
   PointInfo,
   RegularLabel,
 } from "./base";
-import { getInstanceStrokeStyles, t } from "./util";
+import {
+  getInstanceStrokeStyles,
+  getLabelAttributesText,
+  resolveLabelSelectionVisuals,
+  sizeInImagePixels,
+  t,
+} from "./util";
 
 let cache: Record<
   string,
@@ -32,7 +41,7 @@ let lastModalUniqueId = "";
 
 const getIndexIdFromInstanceIdForLabel = (
   instanceId: string,
-  label: DetectionLabel
+  label: DetectionLabel,
 ) => {
   const currentModalUniqueId = jotaiStore.get(currentModalUniqueIdJotaiAtom);
 
@@ -41,7 +50,9 @@ const getIndexIdFromInstanceIdForLabel = (
     cache = {};
   }
 
-  const key = `${currentModalUniqueId}-${label.label.toLocaleLowerCase()}`;
+  const key = `${currentModalUniqueId}-${(
+    label?.label ?? ""
+  ).toLocaleLowerCase()}`;
 
   if (
     cache[key] &&
@@ -71,21 +82,50 @@ export interface DetectionLabel extends RegularLabel {
   mask_path?: string;
   bounding_box?: BoundingBox;
 
+  // 2D boxes: radians, in pixel space around the box center, positive is
+  // clockwise on screen. 3D boxes: [x, y, z] rotation around the center
+  rotation?: number | [number, number, number];
+
   // valid for 3D bounding boxes
   dimensions?: [number, number, number];
   location?: [number, number, number];
-  rotation?: [number, number, number];
   quaternion?: [number, number, number, number];
   convexHull?: Coordinates[];
 }
 
 export default class DetectionOverlay<
-  State extends BaseState
+  State extends BaseState,
 > extends CoordinateOverlay<State, DetectionLabel> {
   private labelBoundingBox: BoundingBox;
 
   containsPoint(state: Readonly<State>): CONTAINS {
     if ((this.label.mask || this.label.mask_path) && !this.label.mask?.data) {
+      return CONTAINS.NONE;
+    }
+
+    // a 3D detection has no 2D box to hit-test
+    if (!this.label.bounding_box) {
+      return CONTAINS.NONE;
+    }
+
+    const rotation = this.getRotation();
+    if (rotation) {
+      if (
+        isPointInRotatedBox(
+          state.pixelCoordinates,
+          this.label.bounding_box,
+          rotation,
+          state.dimensions,
+          sizeInImagePixels(state, state.strokeWidth),
+        )
+      ) {
+        return CONTAINS.CONTENT;
+      }
+
+      if (this.isInHeader(state)) {
+        return CONTAINS.BORDER;
+      }
+
       return CONTAINS.NONE;
     }
 
@@ -117,6 +157,9 @@ export default class DetectionOverlay<
       this.label.instance?._id &&
       isHoveringParticularLabelWithInstanceConfig(this.label.instance._id);
     const isSelected = this.isSelected(state);
+    const labelVisuals = isSelected
+      ? resolveLabelSelectionVisuals(this.label.id, state.options)
+      : null;
 
     const { strokeColor, overlayStrokeColor, overlayDash } =
       getInstanceStrokeStyles({
@@ -124,6 +167,7 @@ export default class DetectionOverlay<
         getColor: () => this.getColor(state),
         isHoveringInstance: !!doesInstanceMatch,
         dashLength: state.dashLength,
+        labelSelectionColor: labelVisuals?.color,
       });
 
     if (
@@ -148,12 +192,37 @@ export default class DetectionOverlay<
   }
 
   getMouseDistance(state: Readonly<State>): number {
+    if (!this.label.bounding_box) {
+      return Infinity;
+    }
+
     const [px, py] = state.pixelCoordinates;
-    const [bx, by, bw, bh] = this.getDrawnBBox(state);
 
     if (this.isInHeader(state)) {
       return 0;
     }
+
+    const rotation = this.getRotation();
+    if (rotation) {
+      const [w, h] = state.dimensions;
+      const corners = getRotatedBoxCorners(
+        this.label.bounding_box,
+        rotation,
+        state.dimensions,
+      ).map(([x, y]): Coordinates => [x * w, y * h]);
+
+      return Math.min(
+        ...corners.map((corner, i) =>
+          distanceFromLineSegment(
+            [px, py],
+            corner,
+            corners[(i + 1) % corners.length],
+          ),
+        ),
+      );
+    }
+
+    const [bx, by, bw, bh] = this.getDrawnBBox(state);
 
     const distances = [
       distanceFromLineSegment([px, py], [bx, by], [bx + bw, by]),
@@ -187,7 +256,10 @@ export default class DetectionOverlay<
 
     const color = this.getColor(state);
 
-    const [tlx, tly, _, __] = this.label.bounding_box;
+    // the header stays unrotated, anchored to the stored box's top-left —
+    // matches the annotate-mode (lighter) header, which keeps the anchor
+    // stationary while a box rotates
+    const [tlx, tly] = this.label.bounding_box;
     ctx.beginPath();
     ctx.fillStyle = color;
     let [ox, oy] = t(state, tlx, tly);
@@ -231,14 +303,21 @@ export default class DetectionOverlay<
       x,
       y,
       w * state.canvasBBox[2],
-      h * state.canvasBBox[3]
+      h * state.canvasBBox[3],
     );
     ctx.globalAlpha = tmp;
   }
 
   private getLabelText(state: Readonly<State>): string {
-    let text =
-      this.label.label && state.options.showLabel ? `${this.label.label}` : "";
+    const attributes = state.options.shownLabelAttributes?.[this.field];
+    let text = attributes
+      ? getLabelAttributesText(
+          this.label,
+          attributes.filter((name) => name !== "index"),
+        )
+      : this.label.label
+        ? `${this.label.label}`
+        : "";
 
     const hasIndex =
       (typeof this.label.index === "string" ||
@@ -247,7 +326,7 @@ export default class DetectionOverlay<
 
     const hasInstanceId = Boolean(this.label.instance?._id);
 
-    if (state.options.showIndex && (hasIndex || hasInstanceId)) {
+    if (attributes?.includes("index") && (hasIndex || hasInstanceId)) {
       if (text.length > 0) {
         text += " ";
       }
@@ -258,25 +337,25 @@ export default class DetectionOverlay<
       } else {
         text += `${getIndexIdFromInstanceIdForLabel(
           this.label.instance._id,
-          this.label
+          this.label,
         )}`;
       }
     }
 
-    if (
-      state.options.showConfidence &&
-      (!isNaN(this.label.confidence as number) ||
-        NONFINITES.has(this.label.confidence as NONFINITE))
-    ) {
-      text.length && (text += " ");
-      text += `(${
-        typeof this.label.confidence === "number"
-          ? Number(this.label.confidence).toFixed(2)
-          : this.label.confidence
-      })`;
+    return text;
+  }
+
+  /**
+   * The 2D scalar rotation to render with, in radians. `0` for unrotated,
+   * 3D, and masked detections (instance masks are stored relative to the
+   * axis-aligned box, so rotation is ignored when a mask is present).
+   */
+  private getRotation(): number {
+    if (this.label.mask || this.label.mask_path) {
+      return 0;
     }
 
-    return text;
+    return getRotation2d(this.label.rotation);
   }
 
   private isInHeader(state: Readonly<State>) {
@@ -295,7 +374,7 @@ export default class DetectionOverlay<
   private fillRectFor3d(
     ctx: CanvasRenderingContext2D,
     state: Readonly<State>,
-    color: string
+    color: string,
   ) {
     const convexHull = this.label.convexHull;
 
@@ -329,17 +408,31 @@ export default class DetectionOverlay<
     ctx: CanvasRenderingContext2D,
     state: Readonly<State>,
     color: string,
-    dash?: number
+    dash?: number,
   ) {
+    const rotation = this.getRotation();
     const [tlx, tly, w, h] = this.label.bounding_box;
+    const corners: Coordinates[] = rotation
+      ? getRotatedBoxCorners(
+          this.label.bounding_box,
+          rotation,
+          state.dimensions,
+        )
+      : [
+          [tlx, tly],
+          [tlx + w, tly],
+          [tlx + w, tly + h],
+          [tlx, tly + h],
+        ];
+
     ctx.beginPath();
     ctx.lineWidth = state.strokeWidth;
     ctx.strokeStyle = color;
     ctx.setLineDash(dash ? [dash] : []);
-    ctx.moveTo(...t(state, tlx, tly));
-    ctx.lineTo(...t(state, tlx + w, tly));
-    ctx.lineTo(...t(state, tlx + w, tly + h));
-    ctx.lineTo(...t(state, tlx, tly + h));
+    ctx.moveTo(...t(state, corners[0][0], corners[0][1]));
+    for (let i = 1; i < corners.length; i++) {
+      ctx.lineTo(...t(state, corners[i][0], corners[i][1]));
+    }
     ctx.closePath();
     ctx.stroke();
   }

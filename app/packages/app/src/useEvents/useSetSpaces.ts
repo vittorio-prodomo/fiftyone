@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import { useSessionSetter } from "@fiftyone/state";
 import { useCallback } from "react";
 import type { LocationState } from "../routing";
@@ -13,15 +17,15 @@ const useSetSpaces: EventHandlerHook = ({ router }) => {
       router.replace(
         resolveURL({
           currentPathname: router.history.location.pathname,
-          currentSearch: router.history.location.search,
+          currentSearch: router.location.search,
           extra: {
             workspace: payload.spaces._name ?? null,
           },
         }),
-        { ...state, event: "spaces", workspace: payload.spaces }
+        { ...state, event: "spaces", workspace: payload.spaces },
       );
     },
-    [router, setter]
+    [router, setter],
   );
 };
 

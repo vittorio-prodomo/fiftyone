@@ -151,6 +151,47 @@ just as you would via the :ref:`FiftyOne App <fiftyone-app>`.
    Did you know? You can also navigate directly to a dataset of interest by
    pasting its URL into your browser's URL bar.
 
+
+.. _enterprise-comments:
+
+Comments
+--------
+
+When using a dataset in the FiftyOne Enterprise App, you can add comments
+to samples and start threads with your team. Comments are a great way to
+provide feedback, ask questions, or collaborate with your team. They are
+especially useful for
+:ref:`annotation workflows <enterprise-workflows>`, where you can leave
+comments on samples that need work while reviewing labels.
+
+.. image:: https://cdn.voxel51.com/enterprise/app/comments.webp
+   :alt: Discussion panel with a comment thread on a sample
+
+.. _enterprise-spatiotemporal-comments:
+
+Spatiotemporal comments
+-----------------------
+
+.. customavailablein::
+    :enterprise_version: 2.25.0
+
+Comments can also be anchored to a point or region on the media itself.
+Click the pin button in the Discussion panel header, then click the sample
+to place a point or drag to mark a region. Each anchor appears as a numbered
+marker on the media. Click a marker to open its thread. Anchors are fixed
+once posted. To move one, delete the comment and place it again.
+
+On videos, an anchor is tied to the current frame. On
+:ref:`grouped datasets <groups>`, it is tied to the current slice. On
+:ref:`multimodal <fiftyone-multimodal>` episodes, it is tied to a tile's
+stream and timestamp. The marker appears only when that frame, slice, or
+timestamp is displayed. The comment's chip in the Discussion panel takes you
+back to it. The video timeline marks every commented frame. Point cloud
+tiles and ordered dynamic groups played as video are not supported.
+
+.. image:: https://cdn.voxel51.com/enterprise/app/comments_spatiotemporal.webp
+   :alt: Anchored comments on a video frame, marked on the timeline and listed in the Discussion panel
+
 .. _enterprise-managing-datasets:
 
 Managing a dataset
@@ -225,3 +266,11 @@ the modal to confirm this action.
 .. warning::
 
    Deleting a dataset is permanent!
+
+.. note::
+
+   The FiftyOne Enterprise App ships with AI-assisted mask segmentation for
+   annotation workflows. The feature works out of the box with no
+   configuration. Deployments that prefer to serve the model weights from
+   their own infrastructure can do so via the
+   :ref:`AI model weights <enterprise-ai-model-weights>` setting.

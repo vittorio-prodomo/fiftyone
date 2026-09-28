@@ -351,6 +351,10 @@ session by either manually configuring port forwarding or via the FiftyOne CLI:
 Using the sidebar
 _________________
 
+.. customavailablein::
+    :oss_version: 0.18.0
+    :enterprise_version: 1.0
+
 Any labels, tags, and scalar fields can be overlaid on the samples in the App
 by toggling the corresponding checkboxes in the App's sidebar:
 
@@ -815,6 +819,10 @@ You can also disable Query Performance by default for all datasets by setting
 Sidebar groups
 --------------
 
+.. customavailablein::
+    :oss_version: 0.18.0
+    :enterprise_version: 1.0
+
 You can customize the layout of the App's sidebar by creating/renaming/deleting
 groups and dragging fields between groups directly in the App:
 
@@ -887,6 +895,29 @@ The view bar makes all of the powerful searching, sorting, and filtering
 operations :ref:`provided by dataset views <using-views>` available directly in
 the App.
 
+The applied view appears as a compact summary chip; hover over it to expand
+the view into its individual stages. Use the ``+`` slot between any two
+stages to insert a stage there: typing filters the available stages, and
+every option describes what its stage does. Clicking anywhere outside the
+bar collapses it back to the summary chip, and the ``x`` at the bar's right
+edge clears the applied view.
+
+Each stage opens as a form generated from its parameters:
+
+-   **Field parameters** offer a picker over the dataset's schema, narrowed
+    to the field types the stage accepts
+-   **Closed-choice parameters** offer the dataset's own values — its group
+    slices, evaluation keys, or similarity indexes
+-   **Expression parameters** accept
+    :ref:`view expressions <querying-samples>` written as Python. The syntax
+    you apply travels with the view, so reopening a stage shows the
+    expression as it was written — including expressions from views saved in
+    Python
+
+The bar is fully keyboard accessible: :kbd:`Enter` finishes a stage and
+applies it, the keyboard lands on the next insert slot, and :kbd:`Esc` closes
+an editor or discards pending work.
+
 .. note::
 
     Any changes to the current view that you make in the view bar are
@@ -898,10 +929,31 @@ the App.
     :alt: app-views2
     :align: center
 
+.. _app-view-bar-search:
+
+Searching with text
+-------------------
+
+When a dataset has a :ref:`similarity index <brain-similarity>` that
+:ref:`supports text prompts <brain-similarity-text>`, the view bar also
+accepts free-form text: type a query and press :kbd:`Enter` to append a
+:class:`SortBySimilarity <fiftyone.core.stages.SortBySimilarity>` stage
+against the most recently created prompt-capable index. The stage lands in
+the bar as a regular pill, so its index, query, and result count are one
+click away from being adjusted.
+
+For a patches-level index, the view is first converted to patches via
+:class:`ToPatches <fiftyone.core.stages.ToPatches>` so the sort applies in
+patch space.
+
 .. _app-dynamic-groups:
 
 Grouping samples
 ________________
+
+.. customavailablein::
+    :oss_version: 0.21.0
+    :enterprise_version: 1.3.0
 
 You can use the group action in the App's menu to
 :ref:`dynamically group <view-groups>` your samples by a field of your choice:
@@ -927,10 +979,18 @@ elements of the group as a video.
    :alt: dynamic-groups
    :align: center
 
+Ordered groups of images can also be annotated as a video, with object tracks
+that span the group's samples. See
+:ref:`Annotating dynamic groups as video <dynamic-group-video-annotation>`.
+
 .. _app-field-visibility:
 
 Field visibility
 ________________
+
+.. customavailablein::
+    :oss_version: 0.21.0
+    :enterprise_version: 1.3.0
 
 You can configure which fields of your dataset appear in the App's sidebar by
 clicking the settings icon in the upper right of the sidebar to open the Field
@@ -1025,6 +1085,10 @@ fields:
 Color schemes
 _____________
 
+.. customavailablein::
+    :oss_version: 0.21.0
+    :enterprise_version: 1.3.0
+
 You can configure the color scheme used by the App to render content by
 clicking on the color palette icon above the sample grid.
 
@@ -1047,6 +1111,10 @@ Consider the following example:
 
 Color schemes in the App
 ------------------------
+
+.. customavailablein::
+    :oss_version: 0.21.5
+    :enterprise_version: 1.3.5
 
 The GIF below demonstrates how to:
 
@@ -1239,6 +1307,10 @@ You can also dynamically edit your current color scheme by modifying it:
 Saving views
 ____________
 
+.. customavailablein::
+    :oss_version: 0.19.0
+    :enterprise_version: 1.1
+
 You can use the menu in the upper-left of the App to record the current state
 of the App's view bar and filters sidebar as a **saved view** into your
 dataset:
@@ -1402,6 +1474,10 @@ hovering, a slider appears to adjust the setting manually.
 Using the 3D visualizer
 _______________________
 
+.. customavailablein::
+    :oss_version: 0.17.0
+    :enterprise_version: 1.0
+
 The 3D visualizer allows you to interactively visualize
 :ref:`3D samples <3d-datasets>` or
 :ref:`point cloud samples <point-cloud-datasets>`
@@ -1466,6 +1542,10 @@ the full colormap using the same strategy.
 
 Dynamic point cloud coloring
 ----------------------------
+
+.. customavailablein::
+    :oss_version: 1.7.0
+    :enterprise_version: 2.10.0
 
 FiftyOne supports dynamic coloring of point clouds based on any attribute
 in your PCD file. This allows you to visualize and analyze point cloud data in
@@ -1693,6 +1773,10 @@ For more information on FiftyOne’s in-App annotation features,
 Linking labels
 ______________
 
+.. customavailablein::
+    :oss_version: 1.5.0
+    :enterprise_version: 2.8.0
+
 FiftyOne provides a mechanism to link related labels together, such as the same
 object instance observed across multiple frames of a video or across different
 slices of a grouped dataset.
@@ -1767,6 +1851,10 @@ slices:
 Spaces
 ______
 
+.. customavailablein::
+    :oss_version: 0.19.0
+    :enterprise_version: 1.1
+
 Spaces provide a customizable framework for organizing interactive Panels of
 information within the App.
 
@@ -1837,6 +1925,10 @@ close Panels by clicking their `x` icon:
 
 Configuring spaces in Python
 ----------------------------
+
+.. customavailablein::
+    :oss_version: 0.19.0
+    :enterprise_version: 1.1
 
 You can also programmatically configure your Space layout and the states of the
 individual Panels via the |Space| and |Panel| classes in Python, as shown
@@ -1934,6 +2026,10 @@ You can reset your spaces to their default state by setting
 
 Saving workspaces
 _________________
+
+.. customavailablein::
+    :oss_version: 0.24.0
+    :enterprise_version: 1.7.0
 
 If you find yourself frequently using/recreating a certain
 :ref:`spaces layout <app-spaces>`, you can save it as a workspace with a name
@@ -2115,6 +2211,10 @@ Samples panel as follows:
 Embeddings panel
 ________________
 
+.. customavailablein::
+    :oss_version: 0.19.0
+    :enterprise_version: 1.1
+
 When you load a dataset in the App that contains an
 :ref:`embeddings visualization <brain-embeddings-visualization>`, you can open
 the Embeddings panel to visualize and interactively explore a scatterplot of
@@ -2200,10 +2300,242 @@ The Embeddings panel supports the following `state` parameters:
 -   **colorByField**: an optional sample field (or label attribute, for patches
     embeddings) to color the points by
 
+.. _app-similarity-search-panel:
+
+Similarity Search panel __SUB_NEW__
+___________________________________
+
+.. customavailablein::
+    :oss_version: 1.15.0
+    :enterprise_version: 2.18.0
+
+When you load a dataset in the App that has one or more
+:ref:`similarity indexes <brain-similarity>`, you can open the Similarity
+Search panel to create, manage, and revisit similarity searches on the dataset.
+
+To get started, compute a similarity index on your dataset using
+:meth:`compute_similarity() <fiftyone.brain.compute_similarity>`:
+
+.. code-block:: python
+    :linenos:
+
+    import fiftyone as fo
+    import fiftyone.brain as fob
+    import fiftyone.zoo as foz
+
+    dataset = foz.load_zoo_dataset("quickstart")
+
+    # Index images by similarity using the default sklearn backend
+    # with a cosine distance metric
+    fob.compute_similarity(
+        dataset,
+        model="clip-vit-base32-torch",
+        backend="sklearn",
+        metric="cosine",
+        brain_key="img_sim",
+    )
+
+    session = fo.launch_app(dataset)
+
+Once the dataset is indexed, you can open the Similarity Search panel from the
+:ref:`similarity popover's <app-similarity>` settings button, or from the App's
+panels menu.
+
+.. note::
+
+    Refer to the :ref:`Brain guide <brain-similarity>` for more information on
+    supported backends (sklearn, Qdrant, Pinecone, MongoDB, etc.), distance
+    metrics, and using custom or precomputed embeddings.
+
+Home page
+---------
+
+The panel's home page displays a list of all past similarity search runs.
+Click any completed run to apply its results to the current view.
+
+.. image:: /images/app/app-similarity-panel-home.png
+    :alt: similarity-panel-home-page
+    :align: center
+
+You can filter the run list by:
+
+-   **Date range**: Today, Last 7 days, Last 30 days, or Older
+-   **Search text**: filter by query content or run name
+-   **Owner**: show all runs or only your own (Enterprise only, for users with
+    `Can manage <https://docs.voxel51.com/enterprise/roles_and_permissions.html#can-manage>`_
+    dataset access)
+
+Managing runs
+~~~~~~~~~~~~~
+
+From the home page, you can manage individual runs by cloning, renaming, or
+deleting them. You can also select multiple runs to delete in bulk — for
+example, filter by **Older** and bulk-delete stale runs.
+
+.. image:: /images/app/app-similarity-panel-manage-runs.gif
+    :alt: similarity-panel-manage-runs
+    :align: center
+
+Checking similarity indexes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+From the home page, you can also navigate to the **Similarity Index** page to
+view the similarity indexes available on your dataset, along with their
+configurations (e.g., similarity index name, model, metric, and whether the
+index supports text queries).
+
+.. image:: /images/app/app-similarity-panel-index-page.gif
+    :alt: similarity-panel-index-page
+    :align: center
+
+Creating a new search
+---------------------
+
+Click the **New search** button to open the search form. The form provides the
+following options:
+
+-   **Query type**: choose between image similarity (using selected samples),
+    text similarity (natural language query), or image upload
+-   **Similarity index** (brain key): select which similarity index to use. The
+    panel shows which indexes support text queries
+-   **Number of results**: the maximum number of results to return
+-   **Reverse**: toggle to find the least similar results instead of the most
+    similar
+-   **Distance field**: optionally specify a field name to store the computed
+    distances on each result sample
+-   **Scope**: search against the current view or the entire dataset
+
+.. note::
+
+    In **image mode**, you can click samples in the grid to select them as
+    **positive** examples (shown with a green check), and alt-click
+    (option-click) to select them as **negative** examples (shown with a red
+    mark). The search will return results similar to the positive samples but
+    dissimilar to the negative ones. Using negative samples is not recommended
+    when your similarity index uses the Euclidean distance metric.
+
+.. image:: /images/app/app-similarity-panel-new-search.png
+    :alt: similarity-panel-new-search-positive-negative
+    :align: center
+
+In **upload mode**, you can upload a local image (under 10MB) to use as the
+query. The uploaded image is used only for the search and will **not** be
+added to your dataset.
+
+If the selected similarity index was built on
+:ref:`object patches <brain-object-similarity>` (e.g., Detections or Polylines),
+the search will return patch results; otherwise it returns sample results.
+
+Delegated execution
+-------------------
+
+Triggered from the popover, similarity searches run immediately on the App
+server by default. If your deployment supports
+:ref:`delegated operations <delegated-operations>`, you can choose to run the
+search on a worker pod instead by selecting **Delegate** as the execution mode.
+This is useful for a large number of results or large datasets.
+
+.. _app-similarity:
+
+Triggering from the grid
+------------------------
+
+.. customavailablein::
+    :oss_version: 0.9.0
+    :enterprise_version: 1.0
+
+In addition to opening the panel from the panels menu, you can also trigger
+similarity searches directly from the sample grid via the **similarity
+popover**: a lightweight menu in the grid toolbar for quick searches. Select
+samples, patches, or labels and click the similarity icon to instantly sort
+by similarity or enter a text query.
+
+.. image:: /images/app/app-similarity-popover.gif
+    :alt: similarity-popover-open-panel
+    :align: center
+
+All popover workflows below share a settings icon that opens the full
+:ref:`Similarity Search panel <app-similarity-search-panel>`, where you can
+specify a larger number of results, query by greatest or least similarity (if
+supported), choose a different similarity index, or optionally save the
+computed distances as a new sample field.
+
+Popover searches always run immediately. After you submit a search, you may
+briefly see a loading indicator (`...`) while the search executes; once it
+completes, the Similarity Search panel opens and displays the results.
+
+.. _app-image-similarity:
+
+Image similarity
+~~~~~~~~~~~~~~~~
+
+Whenever one or more images are selected in the App, the similarity icon
+appears above the grid. If you have indexed the dataset by
+:ref:`image similarity <brain-image-similarity>`, you can click the icon to
+sort by similarity to your current selection.
+
+The popover lets you choose a similarity index and quickly run a search. After the
+search completes, the :ref:`Similarity Search panel <app-similarity-search-panel>`
+opens to display the results, where you can further refine your query or manage
+past searches.
+
+.. image:: /images/brain/brain-image-similarity.gif
+    :alt: image-similarity
+    :align: center
+
+.. _app-object-similarity:
+
+Object similarity
+~~~~~~~~~~~~~~~~~
+
+Whenever one or more labels or patches are selected in the App, the similarity
+icon appears above the sample grid. If you have indexed the dataset by
+:ref:`object similarity <brain-object-similarity>`, you can sort by similarity
+to your current selection.
+
+The typical workflow for object similarity is to first switch to
+:ref:`object patches view <app-object-patches>` for the label field of
+interest. In this view, the similarity icon will appear whenever you have
+selected one or more patches from the grid, and the resulting view will sort
+the patches according to the similarity of their objects with respect to the
+objects in the query patches.
+
+.. image:: /images/brain/brain-object-similarity.gif
+    :alt: object-similarity
+    :align: center
+
+|br|
+You can also sort by similarity to an object from the expanded sample view in
+the App by selecting an object and then using the similarity menu that appears
+in the upper-right corner of the modal:
+
+.. image:: /images/brain/brain-object-similarity-modal.gif
+    :alt: object-similarity-modal
+    :align: center
+
+.. _app-text-similarity:
+
+Text similarity
+~~~~~~~~~~~~~~~
+
+If you have indexed your dataset with a model that
+:ref:`supports text queries <brain-similarity-text>`, you can use the
+similarity popover to search for images (or object patches) of interest via
+arbitrary text queries. Simply type your query into the text input field and
+press search.
+
+.. image:: /images/brain/brain-text-similarity.gif
+   :alt: text-similarity
+   :align: center
+
 .. _app-model-evaluation-panel:
 
 Model Evaluation panel __SUB_NEW__
 __________________________________
+
+.. customavailablein::
+    :oss_version: 1.1.0
+    :enterprise_version: 2.2.0
 
 When you load a dataset in the App that contains one or more
 :ref:`evaluations <evaluating-models>`, you can open the Model Evaluation panel
@@ -2801,6 +3133,10 @@ And you can edit or delete an existing scenario by selecting `Edit` or
 Map panel
 _________
 
+.. customavailablein::
+    :oss_version: 0.17.0
+    :enterprise_version: 1.0
+
 When you load a dataset in the App that contains a |GeoLocation| field with
 :attr:`point <fiftyone.core.labels.GeoLocation.point>` data populated, you can
 open the Map panel to visualize and interactively explore a scatterplot of the
@@ -3115,6 +3451,10 @@ slices of the dataset:
 Persistent selections
 ---------------------
 
+.. customavailablein::
+    :oss_version: 1.6.0
+    :enterprise_version: 2.9.1
+
 By default, selection of samples and/or labels in the App are persisted for the
 duration of the App session:
 
@@ -3154,6 +3494,10 @@ When in expanded sample mode:
 
 Tags and tagging
 ________________
+
+.. customavailablein::
+    :oss_version: 0.8.0
+    :enterprise_version: 1.0
 
 Tagging is a first-class citizen in FiftyOne, as both |Sample| and |Label|
 instances have a ``tags`` attribute that you can use to store arbitrary string
@@ -3230,6 +3574,10 @@ excluded.
 
 Viewing object patches
 ______________________
+
+.. customavailablein::
+    :oss_version: 0.9.0
+    :enterprise_version: 1.0
 
 Whenever you load a dataset in the App that contains label list fields in
 |Detections| or |Polylines| format, you can use the patches menu to create a
@@ -3342,6 +3690,10 @@ opposed to their labels) will not affect the sample tags of the underlying
 Viewing video clips
 ___________________
 
+.. customavailablein::
+    :oss_version: 0.14.0
+    :enterprise_version: 1.0
+
 Whenever you load a video dataset in the App that contains |TemporalDetection|
 labels or frame-level label lists such as |Detections|, you can use the patches
 menu to create a view into your data that contains one sample per clip defined
@@ -3402,114 +3754,14 @@ to their labels) will not affect the sample tags of the underlying |Sample|.
     Did you know? You can construct clip views programmatically via
     :ref:`dataset views <clip-views>`!
 
-.. _app-similarity:
-
-Sorting by similarity
-_____________________
-
-Whenever you select samples, patches, or labels in the App in a |Dataset| that
-has been :ref:`indexed by similarity <brain-similarity>`, you can use the
-similarity menu in the App to sort or filter your current view based on
-similarity to the chosen image or object.
-
-.. note::
-
-    Refer to the :ref:`Brain guide <brain-similarity>` for more information
-    about indexing datasets by image/object similarity for use with this
-    feature.
-
-.. _app-image-similarity:
-
-Image similarity
-----------------
-
-Whenever one or more images are selected in the App, the similarity menu icon
-appears above the grid. If you have indexed the dataset by
-:ref:`image similarity <brain-image-similarity>`, then you will be able to sort
-by similarity to your current selection.
-
-You can use the advanced settings menu to choose between multiple brain keys
-and optionally specify a maximum number of matches to return (`k`) and whether
-to query by greatest or least similarity (if supported).
-
-.. image:: /images/brain/brain-image-similarity.gif
-    :alt: image-similarity
-    :align: center
-
-.. note::
-
-    For large datasets, you may notice longer load times the first time you use
-    a similarity index in a session. Subsequent similarity searches will use
-    cached results and will be faster!
-
-.. _app-object-similarity:
-
-Object similarity
------------------
-
-Whenever one or more labels or patches are selected in the App, the similarity
-menu icon appears above the sample grid. If you have indexed the dataset by
-:ref:`object similarity <brain-object-similarity>`, then you will be able to
-sort by similarity to your current selection.
-
-The typical workflow for object similarity is to first switch to
-:ref:`object patches view <app-object-patches>` for the label field of
-interest. In this view, the similarity menu icon will appear whenever you have
-selected one or more patches from the grid, and the resulting view will sort
-the patches according to the similarity of their objects with respect to the
-objects in the query patches.
-
-You can use the advanced settings menu to choose between multiple brain keys
-and optionally specify a maximum number of matches to return (`k`) and whether
-to query by greatest or least similarity (if supported).
-
-.. image:: /images/brain/brain-object-similarity.gif
-    :alt: object-similarity
-    :align: center
-
-|br|
-You can also sort by similarity to an object from the expanded sample view in
-the App by selecting an object and then using the similarity menu that appears
-in the upper-right corner of the modal:
-
-.. image:: /images/brain/brain-object-similarity-modal.gif
-    :alt: object-similarity-modal
-    :align: center
-
-.. note::
-
-    For large datasets, you may notice longer load times the first time you use
-    a similarity index in a session. Subsequent similarity searches will use
-    cached results and will be faster!
-
-.. _app-text-similarity:
-
-Text similarity
----------------
-
-If you have indexed your dataset with a model that
-:ref:`supports text queries <brain-similarity-text>`, you can use the text
-similarity menu in the App to search for images (or object patches) of interest
-via arbitrary text queries!
-
-You can use the advanced settings menu to choose between multiple brain keys
-and optionally specify a maximum number of matches to return (`k`) and whether
-to query by greatest or least similarity (if supported).
-
-.. image:: /images/brain/brain-text-similarity.gif
-   :alt: text-similarity
-   :align: center
-
-.. note::
-
-    Did you know? You can also perform text queries
-    :ref:`via the SDK <brain-similarity-text>` by passing a prompt directly to
-    :meth:`sort_by_similarity() <fiftyone.core.collections.SampleCollection.sort_by_similarity>`!
-
 .. _app-multiple-media-fields:
 
 Multiple media fields
 _____________________
+
+.. customavailablein::
+    :oss_version: 0.17.0
+    :enterprise_version: 1.0
 
 There are use cases where you may want to associate multiple media versions
 with each sample in your dataset, such as:
@@ -3636,8 +3888,8 @@ You can also customize the global App config on a per-session basis:
 
     # Create a custom App config
     app_config = fo.app_config.copy()
-    app_config.show_confidence = False
-    app_config.show_label = True
+    app_config.show_skeletons = False
+    app_config.loop_videos = True
     print(app_config)
 
     # Launch App with custom config
@@ -3658,8 +3910,8 @@ apply the changes:
     print(session.config)
 
     # Customize the config of a live session
-    session.config.show_confidence = True
-    session.config.show_label = True
+    session.config.show_skeletons = True
+    session.config.loop_videos = False
     session.refresh()  # must refresh after edits
 
 Dataset App config

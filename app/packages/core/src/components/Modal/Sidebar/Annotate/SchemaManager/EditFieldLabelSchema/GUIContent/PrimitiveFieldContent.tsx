@@ -72,7 +72,7 @@ const PrimitiveFieldContent = ({
   const [range, setRange] = useState<{ min: string; max: string } | null>(
     config?.range
       ? { min: String(config.range[0]), max: String(config.range[1]) }
-      : null
+      : null,
   );
 
   // Derived state
@@ -135,7 +135,7 @@ const PrimitiveFieldContent = ({
       setTouched({ values: false, range: false });
       onConfigChange(newConfig);
     },
-    [config, onConfigChange]
+    [config, onConfigChange],
   );
 
   const handleValuesChange = useCallback(
@@ -149,7 +149,7 @@ const PrimitiveFieldContent = ({
         values: convertedValues,
       });
     },
-    [config, onConfigChange, isNumericType]
+    [config, onConfigChange, isNumericType],
   );
 
   const handleRangeChange = useCallback(
@@ -180,7 +180,7 @@ const PrimitiveFieldContent = ({
         }
       }
     },
-    [config, onConfigChange]
+    [config, onConfigChange],
   );
 
   const handleBlur = useCallback((field: keyof TouchedFields) => {
@@ -253,7 +253,7 @@ const PrimitiveFieldContent = ({
       {!hasErrors && (
         <>
           <Stack orientation={Orientation.Column} spacing={Spacing.Sm}>
-            <Text variant={TextVariant.Lg}>Field Preview:</Text>
+            <Text variant={TextVariant.Lg}>Field preview:</Text>
             <Text variant={TextVariant.Lg} color={TextColor.Secondary}>
               How this field will appear to users during annotation
             </Text>

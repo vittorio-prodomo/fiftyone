@@ -6,6 +6,7 @@ Utilities for working with annotations in
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 from copy import deepcopy
 from datetime import datetime
 from collections import defaultdict
@@ -29,12 +30,9 @@ import fiftyone.utils.annotations as foua
 
 ls = fou.lazy_import(
     "label_studio_sdk",
-    callback=lambda: fou.ensure_import("label_studio_sdk>=0.0.13"),
+    callback=lambda: fou.ensure_import("label_studio_sdk>=1.0.0"),
 )
-brush = fou.lazy_import(
-    "label_studio_converter.brush",
-    callback=lambda: fou.ensure_import("label_studio_converter.brush"),
-)
+brush = fou.lazy_import("label_studio_sdk.converter.brush")
 etree = fou.lazy_import(
     "lxml.etree",
     callback=lambda: fou.ensure_import("lxml.etree"),

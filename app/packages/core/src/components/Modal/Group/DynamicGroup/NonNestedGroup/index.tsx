@@ -1,5 +1,5 @@
 import * as fos from "@fiftyone/state";
-import React, { useEffect } from "react";
+import { useEffect } from "react";
 import { useRecoilState, useRecoilValue } from "recoil";
 import styled from "styled-components";
 import { Sample2D } from "../../../Sample2D";
@@ -24,28 +24,30 @@ const ElementsContainer = styled.div`
 
 export const NonNestedDynamicGroup = () => {
   const [isBigLookerVisible, setIsBigLookerVisible] = useRecoilState(
-    fos.groupMediaIsMain2DViewerVisibleSetting
+    fos.groupMediaIsMain2DViewerVisibleSetting,
   );
   const viewMode = useRecoilValue(fos.dynamicGroupsViewMode(true));
   const isCarouselVisible = useRecoilValue(
-    fos.groupMediaIsCarouselVisibleSetting
+    fos.groupMediaIsCarouselVisibleSetting,
   );
   const parent = useRecoilValue(fos.parentMediaTypeSelector);
+  const isAnnotateMode = fos.useModalMode() === fos.ModalMode.ANNOTATE;
 
+  // This effect ensures the main 2D viewer stays visible outside carousel mode (skipped in annotate mode)
   useEffect(() => {
-    if (!isBigLookerVisible && viewMode !== "carousel") {
+    if (!isBigLookerVisible && viewMode !== "carousel" && !isAnnotateMode) {
       setIsBigLookerVisible(true);
     }
-  }, [isBigLookerVisible, viewMode, setIsBigLookerVisible]);
+  }, [isBigLookerVisible, viewMode, setIsBigLookerVisible, isAnnotateMode]);
 
   return (
     <RootContainer>
       <ElementsContainer>
         <>
-          {isCarouselVisible && viewMode === "carousel" && (
+          {!isAnnotateMode && isCarouselVisible && viewMode === "carousel" && (
             <DynamicGroupCarousel />
           )}
-          {isBigLookerVisible && (
+          {(isBigLookerVisible || isAnnotateMode) && (
             <GroupSuspense>
               {!is3d(parent) ? <Sample2D /> : <Sample3d />}
             </GroupSuspense>

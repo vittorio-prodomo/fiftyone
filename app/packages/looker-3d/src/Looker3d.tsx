@@ -1,45 +1,61 @@
 import * as fos from "@fiftyone/state";
-import {
-  isFo3d,
-  isPointCloud,
-  setContainsPointCloud,
-} from "@fiftyone/utilities";
-import { useAtomValue } from "jotai";
+import { is3d, isDirect3dSamplePath, setContains3d } from "@fiftyone/utilities";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRecoilValue, useSetRecoilState } from "recoil";
 import { ActionBar } from "./action-bar";
-import { Container } from "./containers";
+import { useWorkingLabel } from "./annotation/store/working";
+import { CAMERA_LOOK_AT_SETTLED_EVENT, SCENE_READY_EVENT } from "./constants";
+import { LoadingDots } from "@fiftyone/components";
+import { Container, LoadingCover } from "./containers";
 import { Fo3dErrorBoundary } from "./ErrorBoundary";
 import { Leva } from "./fo3d/Leva";
 import { MediaTypeFo3dComponent } from "./fo3d/MediaTypeFo3d";
+import { getMediaPathForFo3dSample } from "./fo3d/utils";
 import { useHotkey } from "./hooks";
-import { MediaTypePcdComponent } from "./MediaTypePcd";
+import { getLooker3dRenderKey } from "./looker3d-render-key";
 import {
-  clearTransformStateSelector,
   currentActionAtom,
   fo3dContainsBackground,
   isColormapModalOpenAtom,
   isGridOnAtom,
   isLevaConfigPanelOnAtom,
-  selectedLabelForAnnotationAtom,
 } from "./state";
+import {
+  useActiveSegmentationVertexCount,
+  useCurrentSelected3dAnnotationLabel,
+  useFo3dSceneReady,
+} from "./state/accessors";
+import { isPolyline3dOverlay } from "./types";
 
 /**
- * This component is responsible for rendering both "3d" as well as
- * "point_cloud" media types.
- *
- * While "point_cloud" media type is subsumed by "3d" media type, we still
- * need to support it for backwards compatibility.
+ * This component renders all supported 3D contexts through the FO3D pipeline,
+ * including legacy point-cloud media types.
  */
 export const Looker3d = () => {
   const mediaType = useRecoilValue(fos.mediaType);
-  const hasFo3dSlice = useRecoilValue(fos.hasFo3dSlice);
-  const hasPcdSlices = setContainsPointCloud(
-    useRecoilValue(fos.groupMediaTypesSet)
-  );
+  const has3dSlices = setContains3d(useRecoilValue(fos.groupMediaTypesSet));
   const isDynamicGroup = useRecoilValue(fos.isDynamicGroup);
+  const isGroup = useRecoilValue(fos.isGroup);
+  const modalMode = fos.useModalMode();
+  const isMain2DViewerVisible = useRecoilValue(
+    fos.groupMediaIsMain2DViewerVisible,
+  );
   const parentMediaType = useRecoilValue(fos.parentMediaTypeSelector);
-  const mode = useAtomValue(fos.modalMode);
+  const sample = fos.useStableSceneSample3d();
+  const mediaField = useRecoilValue(fos.selectedMediaField(true));
+  const mediaPath = useMemo(
+    () => (sample ? getMediaPathForFo3dSample(sample, mediaField) : null),
+    [sample, mediaField],
+  );
+  const hasDirect3dPath = useMemo(
+    () =>
+      Boolean(
+        mediaPath &&
+        (isDirect3dSamplePath(mediaPath) ||
+          isDirect3dSamplePath(sample?.sample?.filepath)),
+      ),
+    [mediaPath, sample],
+  );
 
   const [isHovering, setIsHovering] = useState(false);
   const timeout = useRef<ReturnType<typeof setTimeout>>(null);
@@ -51,35 +67,66 @@ export const Looker3d = () => {
 
   const thisSampleId = useRecoilValue(fos.modalSampleId);
 
+  const selectedLabelForAnnotation = useCurrentSelected3dAnnotationLabel();
+  const workingLabel = useWorkingLabel(selectedLabelForAnnotation?._id ?? "");
+  // the in-progress polyline's vertices; the e2e draw helper waits on it
+  const draftVertexCount = useActiveSegmentationVertexCount();
+  const selectedVertexCount =
+    workingLabel && isPolyline3dOverlay(workingLabel)
+      ? workingLabel.data.points3d?.reduce(
+          (count, segment) => count + segment.length,
+          0,
+        )
+      : undefined;
+
   useEffect(() => {
     return () => {
       setFo3dHasBackground(false);
     };
-  }, []);
+  }, [setFo3dHasBackground]);
 
-  const shouldRenderPcdComponent = useMemo(
-    () =>
-      isPointCloud(mediaType) ||
-      (mediaType === "group" && hasPcdSlices) ||
-      (isDynamicGroup && isPointCloud(parentMediaType)),
-    [mediaType, hasPcdSlices, isDynamicGroup, parentMediaType]
-  );
   const shouldRenderFo3dComponent = useMemo(
     () =>
-      isFo3d(mediaType) ||
-      (mediaType === "group" && hasFo3dSlice) ||
-      (isDynamicGroup && isFo3d(parentMediaType)),
-    [mediaType, hasFo3dSlice, isDynamicGroup, parentMediaType]
+      is3d(mediaType) ||
+      hasDirect3dPath ||
+      (mediaType === "group" && has3dSlices) ||
+      (isDynamicGroup && is3d(parentMediaType)),
+    [mediaType, hasDirect3dPath, has3dSlices, isDynamicGroup, parentMediaType],
   );
 
-  const sampleMap = useRecoilValue(fos.active3dSlicesToSampleMap);
+  const sampleMap = fos.useStableActive3dSamplesMap();
+  const activeFo3dSlice = fos.useStableActiveFo3dSlice();
+  const renderContext =
+    modalMode === fos.ModalMode.ANNOTATE && !(isGroup && isMain2DViewerVisible)
+      ? "annotate-focused"
+      : "default";
+  fos.useReportAnnotationSurface(
+    renderContext === "annotate-focused" ? "3d" : null,
+  );
+
+  const looker3dSceneKey = getLooker3dRenderKey({
+    modalSampleId: thisSampleId,
+    activeFo3dSlice,
+    renderContext,
+  });
+
+  // the first look-at settle after a scene (re)mount makes the view
+  // raycastable; the e2e draw helpers gate on it through `data-scene-ready`
+  const sceneReady = useFo3dSceneReady();
+  const [cameraSettledKey, setCameraSettledKey] = useState<string | null>(null);
+  useEffect(() => {
+    const onSettled = () => setCameraSettledKey(looker3dSceneKey);
+    document.addEventListener(CAMERA_LOOK_AT_SETTLED_EVENT, onSettled);
+    return () =>
+      document.removeEventListener(CAMERA_LOOK_AT_SETTLED_EVENT, onSettled);
+  }, [looker3dSceneKey]);
 
   useHotkey(
     "KeyG",
     async ({ set }) => {
       set(isGridOnAtom, (prev) => !prev);
     },
-    []
+    [],
   );
 
   useHotkey(
@@ -93,7 +140,7 @@ export const Looker3d = () => {
       }
 
       const isColormapModalOpen = await snapshot.getPromise(
-        isColormapModalOpenAtom
+        isColormapModalOpenAtom,
       );
       if (isColormapModalOpen) {
         set(isColormapModalOpenAtom, false);
@@ -101,7 +148,7 @@ export const Looker3d = () => {
       }
 
       const isLevaConfigPanelOn = await snapshot.getPromise(
-        isLevaConfigPanelOnAtom
+        isLevaConfigPanelOnAtom,
       );
       if (isLevaConfigPanelOn) {
         set(isLevaConfigPanelOnAtom, false);
@@ -154,7 +201,7 @@ export const Looker3d = () => {
     [sampleMap, isHovering],
     {
       useTransaction: false,
-    }
+    },
   );
 
   const clear = useCallback(() => {
@@ -174,21 +221,40 @@ export const Looker3d = () => {
     };
   }, [clear, isHovering]);
 
-  if (!shouldRenderPcdComponent && !shouldRenderFo3dComponent) {
+  const revealed = sceneReady && cameraSettledKey === looker3dSceneKey;
+  useEffect(() => {
+    if (revealed) {
+      document.dispatchEvent(
+        new CustomEvent(SCENE_READY_EVENT, {
+          detail: { sceneKey: looker3dSceneKey },
+        }),
+      );
+    }
+  }, [revealed, looker3dSceneKey]);
+
+  if (!sample) return null;
+
+  if (!shouldRenderFo3dComponent) {
     return <div>Unsupported media type: {mediaType}</div>;
   }
 
-  const component = shouldRenderFo3dComponent ? (
-    <MediaTypeFo3dComponent key={thisSampleId} />
-  ) : (
-    <MediaTypePcdComponent key={thisSampleId} />
-  );
-
   return (
-    <Fo3dErrorBoundary boundaryName="fo3d">
+    <Fo3dErrorBoundary key={looker3dSceneKey} boundaryName="fo3d">
       <Leva />
-      <Container onMouseOver={update} onMouseMove={update} data-cy="looker3d">
-        {component}
+      <Container
+        onMouseOver={update}
+        onMouseMove={update}
+        data-cy="looker3d"
+        data-cy-selected-vertex-count={selectedVertexCount}
+        data-cy-draft-vertex-count={draftVertexCount}
+        data-scene-ready={revealed ? "true" : "false"}
+      >
+        <MediaTypeFo3dComponent key={looker3dSceneKey} />
+        {!revealed && (
+          <LoadingCover>
+            <LoadingDots />
+          </LoadingCover>
+        )}
         <ActionBar
           onMouseEnter={() => {
             hoveringRef.current = true;

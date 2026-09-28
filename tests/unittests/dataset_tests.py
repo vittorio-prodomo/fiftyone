@@ -11,16 +11,20 @@ import os
 import random
 import string
 import unittest
+import warnings
 from collections import Counter
 from copy import copy, deepcopy
 from datetime import date, datetime, timedelta
 from functools import partial
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import eta.core.utils as etau
 import numpy as np
 import pytz
+import bson
 from bson import ObjectId
+from pymongo.errors import BulkWriteError
+from pymongo.results import BulkWriteResult, InsertManyResult
 from decorators import drop_datasets, skip_windows
 from freezegun import freeze_time
 from mongoengine import ValidationError
@@ -29,6 +33,7 @@ import fiftyone as fo
 import fiftyone.core.fields as fof
 import fiftyone.core.odm as foo
 import fiftyone.core.utils as fou
+import fiftyone.core.media as fom
 import fiftyone.utils.data as foud
 from fiftyone import ViewField as F
 from fiftyone.operators.store import ExecutionStoreService
@@ -471,6 +476,56 @@ class DatasetTests(unittest.TestCase):
         # Datasets should automatically refresh upon save() errors
         field = dataset.get_field("frames.ground_truth.detections.label")
         self.assertEqual(field.info, {"foo2": "bar2"})
+
+    @drop_datasets
+    def test_dataset_field_info_serialization(self):
+        # https://github.com/voxel51/fiftyone/issues/2865
+        #
+        # Untyped `info` dicts must serialize the same value types that are
+        # natively supported by typed fields (dates, numpy arrays, etc),
+        # since untyped dict values otherwise bypass each subfield's own
+        # `to_mongo()`
+        dataset = fo.Dataset()
+
+        today = date.today()
+        arr = np.array([1.0, 2.0, 3.0])
+
+        dataset.add_sample_field(
+            "field1",
+            fo.DateField,
+            info={
+                "date": today,
+                "nested": {"date": today},
+                "list": [today],
+                "arr": arr,
+                "flag": True,
+                "n": 5,
+            },
+        )
+
+        field = dataset.get_field("field1")
+        self.assertEqual(field.info["date"], today)
+        self.assertEqual(field.info["nested"]["date"], today)
+        self.assertEqual(field.info["list"], [today])
+        self.assertTrue(np.array_equal(field.info["arr"], arr))
+        self.assertEqual(field.info["flag"], True)
+        self.assertEqual(field.info["n"], 5)
+
+        dataset.reload()
+
+        # `date` values necessarily round-trip as UTC midnight `datetime`
+        # values, since BSON has no native date-only type
+        field = dataset.get_field("field1")
+        self.assertEqual(
+            field.info["date"], datetime(today.year, today.month, today.day)
+        )
+
+        # The array must round-trip with its values intact, not be mangled
+        # into a list of raw serialized bytes (a regression risk of
+        # `DictField.to_mongo()` delegating to `super().to_mongo()`, which
+        # would recurse back into itself and treat the already-serialized
+        # `Binary` value as an iterable of raw bytes)
+        self.assertTrue(np.array_equal(field.info["arr"], arr))
 
     @drop_datasets
     def test_dataset_shared_field_metadata(self):
@@ -1603,6 +1658,48 @@ class DatasetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dataset.clone_sample_field("foo", "_private")
 
+        # "pk" is a reserved keyword (MongoEngine's alias for "id");
+        # using it warns but is not (yet) an error
+
+        with self.assertWarns(UserWarning):
+            dataset.add_sample_field("pk", fo.StringField)
+
+        self.assertIn("pk", dataset.get_field_schema())
+        dataset.delete_sample_field("pk")
+
+        with self.assertWarns(UserWarning):
+            dataset.rename_sample_field("foo", "pk")
+
+        dataset.rename_sample_field("pk", "foo")
+
+        with self.assertWarns(UserWarning):
+            dataset.clone_sample_field("foo", "pk")
+
+        dataset.delete_sample_field("pk")
+
+        dataset.add_sample_field(
+            "spam",
+            fo.EmbeddedDocumentField,
+            embedded_doc_type=fo.DynamicEmbeddedDocument,
+        )
+
+        # The warning fires exactly once per operation
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            dataset.add_sample_field("spam.pk", fo.StringField)
+
+        self.assertEqual(
+            len([x for x in w if "reserved" in str(x.message)]), 1
+        )
+
+        # Dynamic schema expansion warns when a `pk` field enters the schema
+        embedded = fo.DynamicEmbeddedDocument()
+        embedded["pk"] = fo.DynamicEmbeddedDocument(value=51)
+        sample = fo.Sample(filepath="image.jpg", embedded=embedded)
+
+        with self.assertWarns(UserWarning):
+            dataset.add_sample(sample, dynamic=True)
+
     @drop_datasets
     def test_frame_field_names(self):
         dataset = fo.Dataset()
@@ -1612,6 +1709,13 @@ class DatasetTests(unittest.TestCase):
         # "frames" is a reserved keyword
         with self.assertRaises(ValueError):
             dataset.add_sample_field("frames", fo.StringField)
+
+        # "pk" is a reserved keyword (MongoEngine's alias for "id");
+        # using it warns but is not (yet) an error
+        with self.assertWarns(UserWarning):
+            dataset.add_frame_field("pk", fo.StringField)
+
+        dataset.delete_frame_field("pk")
 
         # Field names cannot be empty
 
@@ -3325,6 +3429,39 @@ class DatasetTests(unittest.TestCase):
         )
 
     @drop_datasets
+    def test_merge_samples_embedded_docs_multiple_list_fields(self):
+        sample1 = fo.Sample(
+            filepath="image.jpg",
+            data=fo.DynamicEmbeddedDocument(
+                tags=["1"],
+                values=[1, 2, 3],
+            ),
+        )
+
+        sample2 = fo.Sample(
+            filepath="image.jpg",
+            tags=["2"],
+            values=[4, 5],
+        )
+
+        dataset1 = fo.Dataset()
+        dataset1.add_sample(sample1, dynamic=True)
+
+        dataset2 = fo.Dataset()
+        dataset2.add_sample_field(
+            "values", fof.ListField, subfield=fof.IntField
+        )
+        dataset2.add_sample(sample2)
+
+        dataset1.merge_samples(
+            dataset2,
+            fields={"tags": "data.tags", "values": "data.values"},
+        )
+
+        self.assertListEqual(sample1.data.tags, ["1", "2"])
+        self.assertListEqual(sample1.data.values, [1, 2, 3, 4, 5])
+
+    @drop_datasets
     def test_add_collection(self):
         sample1 = fo.Sample(filepath="image.jpg", foo="bar")
         dataset1 = fo.Dataset()
@@ -4865,6 +5002,35 @@ class DatasetTests(unittest.TestCase):
                 dataset3.static_transforms, dataset.static_transforms
             )
 
+    @drop_datasets
+    def test_media_type(self):
+        dataset = fo.Dataset("test_media_type", media_type=fom.IMAGE)
+        assert dataset.media_type == fom.IMAGE
+
+        del fo.Dataset._instances["test_media_type"]
+        dataset2 = fo.load_dataset("test_media_type")
+        assert dataset2.media_type == fom.IMAGE
+
+    @drop_datasets
+    def test_media_type_side_effects(self):
+        dataset = fo.Dataset("test_media_type", media_type=fom.IMAGE)
+
+        metadata = next(
+            field
+            for field in dataset._doc.sample_fields
+            if field.name == "metadata"
+        )
+
+        assert (
+            metadata.embedded_doc_type
+            == "fiftyone.core.metadata.ImageMetadata"
+        )
+
+    @drop_datasets
+    def test_media_type_validated(self):
+        with self.assertRaises(ValueError):
+            fo.Dataset("test_media_type", media_type="not_a_valid_media_type")
+
     def _assert_camera_intrinsics_equal(self, actual, expected):
         self.assertEqual(set(actual.keys()), set(expected.keys()))
 
@@ -4933,6 +5099,190 @@ class DatasetTests(unittest.TestCase):
                     actual_extrinsics.quaternion[i],
                     expected_extrinsics.quaternion[i],
                 )
+
+
+class _AdmissionSample:
+    """A sample stand-in for the batch write paths."""
+
+    def __init__(self, sample_id=None):
+        self.id = sample_id
+        self._id = ObjectId(sample_id) if sample_id is not None else None
+        self.media_type = fom.IMAGE
+
+    def _set_backing_doc(self, doc, dataset=None):
+        pass
+
+
+class _RecordingAdmitter(foo.InsertAdmitter):
+    """An admitter that remembers what it was asked and what it was told."""
+
+    def __init__(self, refuse=False, sizing=False):
+        self.refuse = refuse
+        self.sizing = sizing
+        self.admitted = []
+        self.recorded = []
+        self.num_bytes = []
+
+    def wants_bytes(self):
+        return self.sizing
+
+    def admit(self, collection_name, num_docs, num_bytes=None):
+        if self.refuse:
+            raise foo.InsertRefusedError("refused")
+
+        self.admitted.append((collection_name, num_docs))
+        self.num_bytes.append(("admit", num_bytes))
+
+    def record(self, collection_name, num_docs, num_bytes=None):
+        self.recorded.append((collection_name, num_docs))
+        self.num_bytes.append(("record", num_bytes))
+
+
+def _new_sample_and_doc(filepath="im.png"):
+    return (_AdmissionSample(), {"_id": ObjectId(), "filepath": filepath})
+
+
+def _existing_sample_and_doc(filepath="im.png"):
+    sample = _AdmissionSample(sample_id=str(ObjectId()))
+    return (sample, {"_id": sample._id, "filepath": filepath})
+
+
+class SampleBatchAdmissionTests(unittest.TestCase):
+    """These batch writes go straight to pymongo rather than through
+    ``insert_documents``, so they consult the insert admitters
+    themselves."""
+
+    def setUp(self):
+        self._admitters = list(foo.database._insert_admitters)
+        foo.database._insert_admitters.clear()
+
+        self.admitter = _RecordingAdmitter()
+        foo.register_insert_admitter(self.admitter)
+
+    def tearDown(self):
+        foo.database._insert_admitters[:] = self._admitters
+
+    def _make_dataset(self, num_existing=0):
+        dataset = MagicMock()
+        dataset._sample_collection_name = "samples.test"
+        dataset._sample_collection.count_documents.return_value = num_existing
+        dataset._sample_collection.codec_options = bson.DEFAULT_CODEC_OPTIONS
+        return dataset
+
+    def _inserts(self, dataset, samples_and_docs):
+        dataset._sample_collection.insert_many.return_value = InsertManyResult(
+            [d["_id"] for _, d in samples_and_docs], acknowledged=True
+        )
+
+    def _upserts(self, dataset, inserted=0, upserted=0):
+        dataset._sample_collection.bulk_write.return_value = BulkWriteResult(
+            {"nInserted": inserted, "nUpserted": upserted}, acknowledged=True
+        )
+
+    def test_add_samples_batch(self):
+        dataset = self._make_dataset()
+        samples_and_docs = [_new_sample_and_doc() for _ in range(3)]
+        self._inserts(dataset, samples_and_docs)
+
+        fo.Dataset._add_samples_batch(dataset, samples_and_docs)
+
+        self.assertEqual(self.admitter.admitted, [("samples.test", 3)])
+        self.assertEqual(self.admitter.recorded, [("samples.test", 3)])
+
+    def test_upsert_samples_batch_counts_new_documents(self):
+        # one replace of a sample in the collection, one replace of a sample
+        # whose ID is not, and one explicit insert: two new documents
+        dataset = self._make_dataset(num_existing=1)
+        present = _existing_sample_and_doc("im1.png")
+        absent = _existing_sample_and_doc("im2.png")
+        samples_and_docs = [present, absent, _new_sample_and_doc("im3.png")]
+        self._upserts(dataset, inserted=1, upserted=1)
+
+        fo.Dataset._upsert_samples_batch(dataset, samples_and_docs)
+
+        dataset._sample_collection.count_documents.assert_called_once_with(
+            {"_id": {"$in": [present[0]._id, absent[0]._id]}}
+        )
+        self.assertEqual(self.admitter.admitted, [("samples.test", 2)])
+        self.assertEqual(self.admitter.recorded, [("samples.test", 2)])
+
+    def test_upsert_samples_batch_with_no_new_documents(self):
+        dataset = self._make_dataset(num_existing=1)
+        samples_and_docs = [_existing_sample_and_doc()]
+        self._upserts(dataset)
+
+        fo.Dataset._upsert_samples_batch(dataset, samples_and_docs)
+
+        self.assertEqual(self.admitter.admitted, [("samples.test", 0)])
+        self.assertEqual(self.admitter.recorded, [("samples.test", 0)])
+
+    def test_upsert_samples_batch_does_not_count_when_unadmitted(self):
+        # the count of new documents costs a query, which a write nobody
+        # admits never pays
+        foo.database._insert_admitters.clear()
+        dataset = self._make_dataset()
+        samples_and_docs = [_existing_sample_and_doc()]
+        self._upserts(dataset)
+
+        fo.Dataset._upsert_samples_batch(dataset, samples_and_docs)
+
+        dataset._sample_collection.count_documents.assert_not_called()
+        dataset._sample_collection.bulk_write.assert_called_once()
+
+    def test_refused_batch_is_not_written(self):
+        refusing = _RecordingAdmitter(refuse=True)
+        foo.register_insert_admitter(refusing)
+
+        dataset = self._make_dataset()
+        samples_and_docs = [_new_sample_and_doc()]
+
+        with self.assertRaises(foo.InsertRefusedError):
+            fo.Dataset._add_samples_batch(dataset, samples_and_docs)
+
+        dataset._sample_collection.insert_many.assert_not_called()
+        self.assertEqual(self.admitter.recorded, [])
+        self.assertEqual(refusing.recorded, [])
+
+    def test_failed_write_records_what_landed(self):
+        dataset = self._make_dataset()
+        samples_and_docs = [_new_sample_and_doc() for _ in range(3)]
+        dataset._sample_collection.insert_many.side_effect = BulkWriteError(
+            {"nInserted": 2, "writeErrors": [{"errmsg": "duplicate key"}]}
+        )
+
+        with self.assertRaises(ValueError):
+            fo.Dataset._add_samples_batch(dataset, samples_and_docs)
+
+        self.assertEqual(self.admitter.admitted, [("samples.test", 3)])
+        self.assertEqual(self.admitter.recorded, [("samples.test", 2)])
+
+    def test_add_samples_batch_is_sized_in_bytes(self):
+        self.admitter.sizing = True
+        dataset = self._make_dataset()
+        samples_and_docs = [_new_sample_and_doc() for _ in range(3)]
+        self._inserts(dataset, samples_and_docs)
+        num_bytes = sum(len(bson.encode(d)) for _, d in samples_and_docs)
+
+        fo.Dataset._add_samples_batch(dataset, samples_and_docs)
+
+        self.assertEqual(
+            self.admitter.num_bytes,
+            [("admit", num_bytes), ("record", num_bytes)],
+        )
+
+    def test_upsert_samples_batch_is_never_sized(self):
+        # its ops also replace existing documents, so its encoded size is
+        # not what it adds
+        self.admitter.sizing = True
+        dataset = self._make_dataset()
+        samples_and_docs = [_new_sample_and_doc()]
+        self._upserts(dataset, inserted=1)
+
+        fo.Dataset._upsert_samples_batch(dataset, samples_and_docs)
+
+        self.assertEqual(
+            self.admitter.num_bytes, [("admit", None), ("record", None)]
+        )
 
 
 class DatasetExtrasTests(unittest.TestCase):

@@ -1,0 +1,464 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ *
+ * Instance-level track actions on the video surface: SPLIT re-keys frames from
+ * the playhead onto a fresh instance and MERGE re-keys the source's frames onto
+ * the target (target wins on overlap), each one undo unit that survives a fresh
+ * browser context. Seeded with two tracks on every frame, distinct classes by
+ * default; the successful-merge test re-seeds them same-class since merge is
+ * gated to same-class tracks.
+ */
+import { Browser, expect, test as base } from "src/oss/fixtures";
+import { ModalPom } from "src/oss/poms/modal";
+import type { VideoAnnotatePom } from "src/oss/poms/modal/video-annotate";
+import { getUniqueDatasetNameWithPrefix } from "src/oss/utils";
+import { EventUtils } from "src/shared/event-utils";
+import type { AbstractFiftyoneLoader } from "src/shared/abstract-loader";
+import type { DatasetFactory } from "src/shared/dataset-factory";
+import type { Page } from "src/oss/fixtures";
+
+const datasetName = getUniqueDatasetNameWithPrefix(
+  "annotate-video-track-split-merge",
+);
+const id = "000000000000000000000000";
+const CLASSES = ["vehicle", "person", "road sign"];
+
+const test = base.extend<{ modal: ModalPom }>({
+  modal: async ({ page, eventUtils }, use) => {
+    await use(new ModalPom(page, eventUtils));
+  },
+});
+
+test.beforeAll(async ({ foWebServer }) => {
+  await foWebServer.startWebServer();
+});
+
+test.afterAll(async ({ foWebServer }) => {
+  await foWebServer.stopWebServer();
+});
+
+// Two tracks on sample 0 (vehicle index=1 + a second index=2), every frame.
+// `secondTrackClassIndex` 1 => cross-class ("person"); 0 => same-class ("vehicle").
+const seedTwoTracks = (
+  datasetFactory: typeof DatasetFactory,
+  secondTrackClassIndex = 1,
+) => {
+  const secondClass = CLASSES[secondTrackClassIndex];
+  return datasetFactory.createDataset({
+    mediaType: "video",
+    datasetName,
+    sampleFrames: true,
+    schema: {
+      "frames.detections": "Detections",
+      "frames.detections.detections.instance": "Instance",
+      "frames.detections.detections.keyframe": "BooleanField",
+      "frames.detections.detections.propagation": "DictField",
+    },
+    labelSchemas: {
+      "frames.detections": {
+        type: "detections",
+        component: "dropdown",
+        classes: CLASSES,
+        attributes: [
+          { name: "id", type: "id", component: "text", read_only: true },
+          { name: "tags", type: "list<str>", component: "text" },
+          { name: "confidence", type: "float", component: "text" },
+          { name: "index", type: "int", component: "text" },
+          { name: "mask_path", type: "str", component: "text" },
+        ],
+      },
+    },
+    withFrameData: (_, { label }) => ({
+      detections: label.detections([
+        label.detection({
+          label: "vehicle",
+          bounding_box: [0.3, 0.3, 0.2, 0.2],
+          index: 1,
+          instance: label.instance("vehicle-1"),
+        }),
+        label.detection({
+          label: secondClass,
+          bounding_box: [0.55, 0.55, 0.2, 0.2],
+          index: 2,
+          instance: label.instance(`${secondClass}-2`),
+        }),
+      ]),
+    }),
+  });
+};
+
+test.beforeEach(async ({ datasetFactory }) => {
+  // default: cross-class (vehicle + person) — used by split + merge-gating.
+  await seedTwoTracks(datasetFactory);
+});
+
+const openAnnotate = async (
+  fiftyoneLoader: AbstractFiftyoneLoader,
+  modal: ModalPom,
+  page: Page,
+) => {
+  await fiftyoneLoader.waitUntilGridVisible(page, datasetName, {
+    searchParams: new URLSearchParams({ id }),
+  });
+  await modal.assert.isOpen();
+  await modal.sidebar.switchMode("annotate");
+  await modal.videoAnnotate.waitForSurface();
+};
+
+/** Verify persisted state from a brand-new browser context (true round-trip). */
+const inFreshContext = async (
+  browser: Browser,
+  fiftyoneLoader: AbstractFiftyoneLoader,
+  verify: (modal: ModalPom) => Promise<void>,
+) => {
+  const context = await browser.newContext();
+  const freshPage = await context.newPage();
+  try {
+    const freshModal = new ModalPom(freshPage, new EventUtils(freshPage));
+    await openAnnotate(fiftyoneLoader, freshModal, freshPage);
+    await verify(freshModal);
+  } finally {
+    await context.close();
+  }
+};
+
+/** The object tracks on the timeline before an edit: every track id, and the one to split. */
+interface TrackIds {
+  all: Set<string>;
+  target: string;
+}
+
+const timelineTracks = async (
+  va: VideoAnnotatePom,
+  targetLabel: string,
+): Promise<TrackIds> => ({
+  all: new Set(await va.objectTrackIds()),
+  target: await va.labelRowId(targetLabel),
+});
+
+/**
+ * The two tracks a split leaves on a fresh browser context's timeline: `head`
+ * (the original instance, frames before the cut) and `tail` (the minted
+ * instance, frames from the cut on), each with the cut-adjacent frame as its
+ * only keyframe and exactly one of them painted on every frame. Without the
+ * keyframe pins the shape at the cut jumps; other tracks are ignored.
+ */
+const expectSplitPersisted = async (
+  modal: ModalPom,
+  before: TrackIds,
+  field: string,
+  totalFrames: number,
+  fps: number,
+) => {
+  const va = modal.videoAnnotate;
+  await va.assert.objectTrackCount(before.all.size + 1);
+  const minted = (await va.objectTrackIds()).filter(
+    (trackId) => !before.all.has(trackId),
+  );
+  expect(minted, "the split mints exactly one new instance").toHaveLength(1);
+  const head = before.target;
+  const [tail] = minted;
+
+  // a track spans (firstFrame - 1) / fps to lastFrame / fps
+  const toFrame = (startSec: number) => Math.round(startSec * fps) + 1;
+  await va.openTracksDrawer();
+  const [headSpan] = await va.trackIntervals(head);
+  const [tailSpan] = await va.trackIntervals(tail);
+  const cut = toFrame(tailSpan.start);
+
+  expect(toFrame(headSpan.start)).toBe(1);
+  expect(headSpan.end, "head ends right before the cut").toBeCloseTo(
+    (cut - 1) / fps,
+  );
+  expect(tailSpan.end, "tail runs to the last frame").toBeCloseTo(
+    totalFrames / fps,
+  );
+
+  // a keyframe on a track's last frame draws at the bar's end, one on its
+  // first frame at the bar's start
+  expect(
+    await va.keyframeTimes(head),
+    "head's last frame is its only keyframe",
+  ).toEqual([headSpan.end]);
+  expect(
+    await va.keyframeTimes(tail),
+    "tail's first frame is its only keyframe",
+  ).toEqual([tailSpan.start]);
+
+  // overlay ids are the timeline's track ids (`instance-<id>`)
+  for (let frame = 1; frame <= totalFrames; frame++) {
+    if (frame > 1) {
+      await va.stepForward();
+    }
+    const painted = (await va.canvasOverlayGeometry())
+      .filter((overlay) => overlay.field === field)
+      .map((overlay) => overlay.id)
+      .filter((id) => id === head || id === tail);
+    expect(painted, `frame ${frame} paints the split track once`).toEqual([
+      frame < cut ? head : tail,
+    ]);
+  }
+};
+
+const savedResponse = (page: Page) =>
+  page.waitForResponse(
+    (r) =>
+      /\/sample\//.test(r.url()) &&
+      ["POST", "PATCH", "PUT"].includes(r.request().method()),
+  );
+
+test.describe.serial("video annotation track split / merge", () => {
+  test("split at playhead (context menu) makes two tracks; undo restores one", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    // vehicle + person
+    await va.assert.objectTrackCount(2);
+    const vehicleId = await va.labelRowId("vehicle");
+
+    // the tracks drawer starts closed; pin the row so its timeline interactions
+    // have a visible target
+    await va.pinTrack(vehicleId);
+
+    // seek mid-clip so the playhead sits between the track's first and last
+    // frame — both sides of the split are then non-empty
+    await va.clickTrack(vehicleId);
+    await va.seekToRulerFraction(0.5);
+    await va.splitTrackViaContextMenu(vehicleId);
+
+    // the vehicle track is now two; person is untouched (3 total)
+    await va.assert.objectTrackCount(3);
+
+    // one undo unit: back to vehicle + person
+    await va.undo();
+    await va.assert.objectTrackCount(2);
+    await va.assert.hasTrack(vehicleId);
+  });
+
+  test("split at playhead (toolbar) makes two tracks", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.assert.objectTrackCount(2);
+    const vehicleId = await va.labelRowId("vehicle");
+
+    // the tracks drawer starts closed; pin the row so the timeline click has a
+    // visible target
+    await va.pinTrack(vehicleId);
+
+    // select the track (Split enables with one selected), then seek mid-clip
+    // (the row click that selects also jumps the playhead to the track start)
+    await va.clickTrack(vehicleId);
+    await va.seekToRulerFraction(0.5);
+    await va.clickSplitToolbarButton();
+
+    await va.assert.objectTrackCount(3);
+  });
+
+  test("split pins both sides of the cut as keyframes and persists", async ({
+    browser,
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.assert.objectTrackCount(2);
+    const before = await timelineTracks(va, "vehicle");
+    await va.pinTrack(before.target);
+    await va.clickTrack(before.target);
+    await va.seekToRulerFraction(0.5);
+
+    const saved = modal.sidebar.annotate.waitForPatch();
+    await va.clickSplitToolbarButton();
+    await va.assert.objectTrackCount(3);
+    await saved;
+
+    // 2 s at 10 fps
+    await inFreshContext(browser, fiftyoneLoader, (fresh) =>
+      expectSplitPersisted(fresh, before, "frames.detections", 20, 10),
+    );
+  });
+
+  test("split a polyline track: two tracks, both cut frames keyframes, vertices kept", async ({
+    browser,
+    datasetFactory,
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    // one detection track (vehicle) + one polyline track (person, index=2);
+    // no second detection track, so "person" names the polyline
+    await datasetFactory.createDataset({
+      mediaType: "video",
+      datasetName,
+      sampleFrames: true,
+      schema: {
+        "frames.detections": "Detections",
+        "frames.detections.detections.instance": "Instance",
+        "frames.detections.detections.keyframe": "BooleanField",
+        "frames.detections.detections.propagation": "DictField",
+        "frames.polylines": "Polylines",
+        "frames.polylines.polylines.instance": "Instance",
+        "frames.polylines.polylines.keyframe": "BooleanField",
+        "frames.polylines.polylines.propagation": "DictField",
+      },
+      labelSchemas: {
+        "frames.detections": {
+          type: "detections",
+          component: "dropdown",
+          classes: CLASSES,
+          attributes: [
+            { name: "id", type: "id", component: "text", read_only: true },
+            { name: "tags", type: "list<str>", component: "text" },
+            { name: "confidence", type: "float", component: "text" },
+            { name: "index", type: "int", component: "text" },
+            { name: "mask_path", type: "str", component: "text" },
+          ],
+        },
+        "frames.polylines": {
+          type: "polylines",
+          component: "dropdown",
+          classes: CLASSES,
+          attributes: [
+            { name: "id", type: "id", component: "text", read_only: true },
+            { name: "index", type: "int", component: "text" },
+          ],
+        },
+      },
+      withFrameData: (_, { label }) => ({
+        detections: label.detections([
+          label.detection({
+            label: "vehicle",
+            bounding_box: [0.3, 0.3, 0.2, 0.2],
+            index: 1,
+            instance: label.instance("vehicle-1"),
+          }),
+        ]),
+        polylines: label.polylines([
+          label.polyline({
+            label: "person",
+            points: [
+              [
+                [0.2, 0.2],
+                [0.5, 0.2],
+                [0.35, 0.5],
+              ],
+            ],
+            closed: true,
+            filled: false,
+            index: 2,
+            instance: label.instance("polyline-person-2"),
+          }),
+        ]),
+      }),
+    });
+
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.assert.objectTrackCount(2);
+    const before = await timelineTracks(va, "person");
+    await va.pinTrack(before.target);
+    await va.clickTrack(before.target);
+    await va.seekToRulerFraction(0.5);
+
+    const saved = modal.sidebar.annotate.waitForPatch();
+    await va.clickSplitToolbarButton();
+    await va.assert.objectTrackCount(3);
+    await saved;
+
+    await inFreshContext(browser, fiftyoneLoader, (fresh) =>
+      expectSplitPersisted(fresh, before, "frames.polylines", 20, 10),
+    );
+  });
+
+  test("merge (context menu) folds one same-class track into the other and persists", async ({
+    browser,
+    fiftyoneLoader,
+    modal,
+    page,
+    datasetFactory,
+  }) => {
+    // merge is gated to same-class tracks, so re-seed both as "vehicle". The
+    // two share a class but are distinct instances (index 1 vs 2).
+    await seedTwoTracks(datasetFactory, 0);
+
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.assert.objectTrackCount(2);
+    await va.assert.labelListed("vehicle");
+    const [sourceId] = await va.objectTrackIds();
+
+    // the tracks drawer starts closed; pin the source row so its context menu
+    // is reachable
+    await va.pinTrack(sourceId);
+
+    // merge one vehicle INTO the other; both span every frame, so target-wins
+    // drops every source frame — one track remains, still "vehicle"
+    const saved = savedResponse(page);
+    await va.mergeTrackViaContextMenu(sourceId, "vehicle");
+    await va.assert.objectTrackCount(1);
+    await saved;
+
+    await va.assert.labelListed("vehicle");
+
+    // the merge survives a true round-trip
+    const context = await browser.newContext();
+    const freshPage = await context.newPage();
+    try {
+      const m2 = new ModalPom(freshPage, new EventUtils(freshPage));
+      await openAnnotate(fiftyoneLoader, m2, freshPage);
+      await m2.videoAnnotate.assert.objectTrackCount(1);
+      await m2.videoAnnotate.assert.labelListed("vehicle");
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("merge is gated by class: a cross-class track offers no merge target", async ({
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    // default seed is cross-class (vehicle + person). Merge folds a track into
+    // another OF THE SAME CLASS, so neither track may merge into the other —
+    // the context menu must offer no "Merge into …" item.
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.assert.objectTrackCount(2);
+    await va.assert.labelListed("vehicle");
+    await va.assert.labelListed("person");
+    const personId = await va.labelRowId("person");
+
+    // the tracks drawer starts closed; pin the row so its context menu is
+    // reachable
+    await va.pinTrack(personId);
+
+    // right-click the person track's bar; the menu opens (Delete track proves
+    // it did) but carries no merge target — the only other track is a different
+    // class
+    await va.trackBar(personId).click({ button: "right" });
+    await expect(
+      page.getByRole("menuitem", { name: "Delete track" }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("menuitem", { name: /^Merge into / }),
+    ).toHaveCount(0);
+
+    // both tracks survive — nothing merged
+    await page.keyboard.press("Escape");
+    await va.assert.objectTrackCount(2);
+  });
+});

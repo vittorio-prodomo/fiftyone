@@ -1,3 +1,7 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
+
 import { useSessionSetter, useSetModalState } from "@fiftyone/state";
 import { useCallback } from "react";
 import type { EventHandlerHook } from "./registerEvent";
@@ -19,7 +23,7 @@ const useSetSample: EventHandlerHook = ({ router }) => {
   return useCallback(
     (payload: { sample_id?: string; group_id?: string }) => {
       setModalState().then(() => {
-        const search = new URLSearchParams(router.history.location.search);
+        const search = new URLSearchParams(router.location.search);
         if (payload?.group_id) {
           handleGroupId(search, payload.group_id);
         } else if (payload?.sample_id) {
@@ -51,7 +55,7 @@ const useSetSample: EventHandlerHook = ({ router }) => {
         setter("modalSelector", selector);
       });
     },
-    [router, setModalState, setter]
+    [router, setModalState, setter],
   );
 };
 

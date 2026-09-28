@@ -14,7 +14,7 @@ export class FrameLooker extends AbstractLooker<FrameState> {
 
   getInitialState(
     config: FrameState["config"],
-    options: FrameState["options"]
+    options: FrameState["options"],
   ) {
     options = {
       ...this.getDefaultOptions(),
@@ -62,7 +62,7 @@ export class FrameLooker extends AbstractLooker<FrameState> {
       if (this.state.options.zoom) {
         const filtered = filterOverlaysForZoom(
           this.state.config.view,
-          this.pluckedOverlays
+          this.pluckedOverlays,
         );
         this.state = zoomToContent(this.state, filtered);
       } else {
@@ -78,7 +78,7 @@ export class FrameLooker extends AbstractLooker<FrameState> {
 
   updateOptions(
     options: Partial<FrameState["options"]>,
-    disableReload = false
+    disableReload = false,
   ) {
     const reload =
       !disableReload &&

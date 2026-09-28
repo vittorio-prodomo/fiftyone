@@ -38,9 +38,10 @@ export function useEmptyCanvasInteraction({
 
   const plane = useMemo(
     () => createPlane(planeNormal, planeConstant),
-    [planeNormal, planeConstant]
+    [planeNormal, planeConstant],
   );
 
+  // This effect attaches canvas pointer listeners and removes them on cleanup.
   useEffect(() => {
     const el = (events.connected ?? gl.domElement) as HTMLCanvasElement;
 
@@ -55,6 +56,12 @@ export function useEmptyCanvasInteraction({
 
     const handleDown = (ev: PointerEvent) => {
       if (!isButtonMatch(ev, button)) return;
+      // a press on the canvas takes keyboard ownership from a focused control,
+      // as it would if the camera controls did not preventDefault
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active !== el) {
+        active.blur();
+      }
       onPointerDownRef.current?.();
     };
 

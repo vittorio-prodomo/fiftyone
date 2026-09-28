@@ -2,11 +2,11 @@
  * Copyright 2017-2026, Voxel51, Inc.
  */
 
-import { Undoable } from "@fiftyone/commands";
+import type { AnnotationEventGroup } from "@fiftyone/annotation";
+import type { Undoable } from "@fiftyone/commands";
+import type { EventDispatcher } from "@fiftyone/events";
 import type { BaseOverlay } from "../overlay/BaseOverlay";
 import type { RawLookerLabel } from "../types";
-import { EventDispatcher } from "@fiftyone/events";
-import { AnnotationEventGroup } from "@fiftyone/annotation";
 
 /**
  * Command for transforming an overlay with undo/redo support.
@@ -21,7 +21,7 @@ export class UpdateLabelCommand implements Undoable {
     private overlay: BaseOverlay,
     private currentLabel: RawLookerLabel,
     nextLabel: RawLookerLabel,
-    private readonly eventBus: EventDispatcher<AnnotationEventGroup>
+    private readonly eventBus: EventDispatcher<AnnotationEventGroup>,
   ) {
     this.id = `update-label-${overlay.id}-${Date.now()}`;
     this.description = `Update label ${overlay.id}`;

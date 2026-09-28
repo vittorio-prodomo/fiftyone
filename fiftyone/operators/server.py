@@ -5,6 +5,7 @@ FiftyOne operator server.
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 import contextlib
 import types
 from sse_starlette.sse import EventSourceResponse
@@ -22,6 +23,8 @@ from .executor import (
     resolve_execution_options,
 )
 from .message import GeneratedMessage
+from .operations import build_register_panel_params
+from .panel import Panel
 from .permissions import PermissionedOperatorRegistry
 from .utils import is_method_overridden, create_operator_response
 from .operator import Operator
@@ -57,6 +60,10 @@ class ListOperators(HTTPEndpoint):
             config["skip_input"] = skip_input
             config["skip_output"] = skip_output
             config["can_execute"] = registry.can_execute(serialized_op["uri"])
+            if isinstance(operator, Panel):
+                serialized_op["panel"] = build_register_panel_params(
+                    **operator.resolve_panel_config()
+                )
             operators_as_json.append(serialized_op)
 
         return {

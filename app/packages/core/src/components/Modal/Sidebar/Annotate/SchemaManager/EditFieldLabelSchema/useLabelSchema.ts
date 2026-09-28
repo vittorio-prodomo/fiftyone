@@ -2,22 +2,68 @@
  * Hook for managing label schema editing for a field
  */
 
-import { useOperatorExecutor } from "@fiftyone/operators";
 import {
   useNotification,
   useQueryPerformanceSampleLimit,
 } from "@fiftyone/state";
+import { getFetchFunction } from "@fiftyone/utilities";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { isEqual } from "lodash";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  activeLabelSchemas,
   addToActiveSchemas,
   currentField,
   labelSchemaData,
   removeFromActiveSchemas,
 } from "../../state";
+import {
+  useSchemaManager,
+  type FieldSchema,
+  type UpdateSchemaRequest,
+} from "../../useSchemaManager";
+import {
+  dispatchSchemaManagerEvent,
+  useSchemaManagerEventBus,
+} from "../events";
 import { currentLabelSchema } from "../state";
-import { reconcileComponent } from "../utils";
+import { type AttributeConfig, reconcileComponent } from "../utils";
+
+const fetchAndMergeOntologyAttributes = async (
+  name: string,
+  setCurrent: (updater: (live: unknown) => unknown) => void,
+): Promise<void> => {
+  const result = await getFetchFunction()(
+    "GET",
+    `/ontologies/${encodeURIComponent(name)}/attributes`,
+  );
+
+  const attrs = (result as { attributes: AttributeConfig[] }).attributes;
+  if (!attrs?.length) return;
+
+  setCurrent((live) => {
+    const liveSchema = live as FieldSchema | undefined;
+    // If the ontology was cleared or switched while the fetch was in flight,
+    // discard the result rather than restoring stale data.
+    if (liveSchema?.applied_ontology !== name) return live;
+
+    const existing = Array.isArray(liveSchema.attributes)
+      ? [...liveSchema.attributes]
+      : [];
+    const byName = new Map(existing.map((a) => [a.name, a]));
+    const orderedNames = existing.map((a) => a.name);
+
+    for (const attr of attrs) {
+      if (!byName.has(attr.name)) orderedNames.push(attr.name);
+      byName.set(attr.name, attr);
+    }
+
+    return {
+      ...liveSchema,
+      attributes: orderedNames.map((n) => byName.get(n)),
+    };
+  });
+};
 
 // =============================================================================
 // Internal Hooks
@@ -64,6 +110,35 @@ const useHasChanges = (one: unknown, two: unknown) => {
   }, [one, two]);
 };
 
+/**
+ * Manages pending visibility for a single field. Uses local state to track
+ * whether the user toggled visibility; persisted on save via per-field
+ * activate/deactivate operators.
+ */
+const useVisibility = (field: string) => {
+  const activeSchemas = useAtomValue(activeLabelSchemas);
+  const [toggled, setToggled] = useState(false);
+
+  const savedVisible = (activeSchemas ?? []).includes(field);
+  const isFieldVisible = toggled ? !savedVisible : savedVisible;
+  const visibilityChanged = toggled;
+
+  const toggleVisibility = useCallback(() => {
+    setToggled((t) => !t);
+  }, []);
+
+  const discardVisibility = useCallback(() => {
+    setToggled(false);
+  }, []);
+
+  return {
+    isFieldVisible,
+    visibilityChanged,
+    toggleVisibility,
+    discardVisibility,
+  };
+};
+
 export const useReadOnly = (field: string) => {
   const data = useAtomValue(labelSchemaData(field));
   const [current, setCurrent] = useCurrentLabelSchema(field);
@@ -75,6 +150,52 @@ export const useReadOnly = (field: string) => {
         ...(current as object),
         read_only: !(current as { read_only?: boolean })?.read_only,
       });
+    },
+  };
+};
+
+export const useAppliedOntology = (field: string) => {
+  const [current, setCurrent] = useCurrentLabelSchema(field);
+  const schema = current as FieldSchema | undefined;
+
+  const ontologyAttributes = useMemo<string[]>(
+    () =>
+      Array.isArray(schema?.attributes)
+        ? schema.attributes.reduce<string[]>((acc, a) => {
+            if (a._source && a.name) acc.push(a.name);
+            return acc;
+          }, [])
+        : [],
+    [schema?.attributes],
+  );
+
+  return {
+    appliedOntology: schema?.applied_ontology,
+    appliedTaxonomy: schema?.applied_taxonomy,
+    ontologyAttributes,
+    applyOntology: (name: string, taxonomy?: string) => {
+      const draft: FieldSchema = {
+        ...(schema as FieldSchema),
+        applied_ontology: name,
+        applied_taxonomy: taxonomy,
+      };
+      setCurrent(draft);
+      fetchAndMergeOntologyAttributes(name, setCurrent).catch(() => {
+        console.error(`Failed to fetch ontology attributes for ${name}`);
+      });
+    },
+    clearOntology: () => {
+      const next: FieldSchema = { ...(schema as FieldSchema) };
+      delete next.applied_ontology;
+      delete next.applied_taxonomy;
+      // Drop ontology-owned attributes (carry the `_source` marker). The
+      // backend's dehydrate only strips them while `applied_ontology` is
+      // still set, so we'd leave orphaned `when` clauses for the validator
+      // to reject if we didn't strip them here.
+      if (Array.isArray(next.attributes)) {
+        next.attributes = next.attributes.filter((a) => !a._source);
+      }
+      setCurrent(next);
     },
   };
 };
@@ -102,71 +223,75 @@ const useSavedLabelSchema = (field: string) => {
   ] as const;
 };
 
-const useSave = (field: string) => {
+const useSave = (field: string, visibilityChanged: boolean) => {
   const [isSaving, setIsSaving] = useState(false);
   const [savedLabelSchema, setSaved] = useSavedLabelSchema(field);
-  const update = useOperatorExecutor("update_label_schema");
-  const activate = useOperatorExecutor("activate_label_schemas");
+  const { updateSchema, activateSchemas, deactivateSchemas } =
+    useSchemaManager();
   const addToActive = useSetAtom(addToActiveSchemas);
   const removeFromActive = useSetAtom(removeFromActiveSchemas);
+  const activeSchemas = useAtomValue(activeLabelSchemas);
   const notify = useNotification();
-  const [current] = useCurrentLabelSchema(field);
+  const [current, setCurrent] = useCurrentLabelSchema(field);
   const setCurrentField = useSetAtom(currentField);
+  const { dispatch } = useSchemaManagerEventBus();
 
   return {
     isSaving,
-    save: () => {
+    save: async () => {
       const isFirstSave = !savedLabelSchema;
       setIsSaving(true);
 
       const labelSchema = current ? reconcileComponent(current) : current;
-      const params: Record<string, unknown> = {
-        field,
-        label_schema: labelSchema,
-      };
 
-      update.execute(params, {
-        callback: (result) => {
-          // Always reset saving state
-          setIsSaving(false);
-          document.dispatchEvent(
-            new CustomEvent("schema-manager-save-complete")
-          );
+      let hydrated: unknown;
+      try {
+        const response = await updateSchema({
+          field,
+          label_schema: labelSchema,
+        } as UpdateSchemaRequest);
+        hydrated = response.label_schema;
+      } catch (error) {
+        console.error("Failed to save label schema:", error);
+        setIsSaving(false);
+        dispatchSchemaManagerEvent(dispatch, "schema-manager:save-complete");
+        return;
+      }
 
-          // Check for errors in the result
-          if (result.error) {
-            console.error("Failed to save label schema:", result.error);
-            return;
-          }
+      const resolved = hydrated ?? current;
+      setSaved(resolved);
+      setCurrent(resolved);
+      setIsSaving(false);
+      dispatchSchemaManagerEvent(dispatch, "schema-manager:save-complete");
 
-          // Only update state on success
-          setSaved(current);
+      // Determine activation change: first save auto-activates,
+      // otherwise apply the visibility toggle for this field
+      const fieldSet = new Set([field]);
+      const wasActive = (activeSchemas ?? []).includes(field);
+      const shouldActivate = isFirstSave || (visibilityChanged && !wasActive);
+      const shouldDeactivate = !isFirstSave && visibilityChanged && wasActive;
 
-          // Auto-activate the field on first save
-          if (isFirstSave) {
-            const fieldSet = new Set([field]);
-            addToActive(fieldSet);
-            activate.execute(
-              { fields: [field] },
-              {
-                callback: (activateResult) => {
-                  if (activateResult.error) {
-                    removeFromActive(fieldSet);
-                    notify({
-                      msg: `Failed to activate field: ${
-                        activateResult.errorMessage || activateResult.error
-                      }`,
-                      variant: "error",
-                    });
-                  }
-                },
-              }
-            );
-          }
+      if (shouldActivate) {
+        addToActive(fieldSet);
+        activateSchemas({ fields: [field] }).catch((error) => {
+          removeFromActive(fieldSet);
+          notify({
+            msg: `Failed to activate field: ${error}`,
+            variant: "error",
+          });
+        });
+      } else if (shouldDeactivate) {
+        removeFromActive(fieldSet);
+        deactivateSchemas({ fields: [field] }).catch((error) => {
+          addToActive(fieldSet);
+          notify({
+            msg: `Failed to deactivate field: ${error}`,
+            variant: "error",
+          });
+        });
+      }
 
-          setCurrentField(null);
-        },
-      });
+      setCurrentField(null);
     },
     savedLabelSchema,
   };
@@ -175,26 +300,22 @@ const useSave = (field: string) => {
 const useScan = (field: string) => {
   const [isScanning, setIsScanning] = useState(false);
   const [, setCurrent] = useCurrentLabelSchema(field);
-  const generate = useOperatorExecutor("generate_label_schemas");
+  const { createSchemas } = useSchemaManager();
   const limit = useQueryPerformanceSampleLimit();
+  const { dispatch } = useSchemaManagerEventBus();
   return {
     isScanning,
-    scan: () => {
+    scan: async () => {
       setIsScanning(true);
-      generate.execute(
-        { field, limit },
-        {
-          callback: (result) => {
-            if (result.result) {
-              setCurrent(result.result.label_schema);
-            }
-            setIsScanning(false);
-            document.dispatchEvent(
-              new CustomEvent("schema-manager-scan-complete")
-            );
-          },
+      try {
+        const result = await createSchemas({ field, limit });
+        if (result.label_schema) {
+          setCurrent(result.label_schema);
         }
-      );
+      } finally {
+        setIsScanning(false);
+        dispatchSchemaManagerEvent(dispatch, "schema-manager:scan-complete");
+      }
     },
     cancelScan: () => {
       setIsScanning(false);
@@ -209,7 +330,8 @@ const useValidate = (field: string) => {
 
   const [, setCurrent] = useCurrentLabelSchema(field);
   const discard = useDiscard(field, () => setErrors([]));
-  const validate = useOperatorExecutor("validate_label_schemas");
+  const { validateSchemas } = useSchemaManager();
+  const { dispatch } = useSchemaManagerEventBus();
 
   const resetErrors = useCallback(() => {
     setErrors([]);
@@ -222,42 +344,33 @@ const useValidate = (field: string) => {
     isValid,
     isValidating,
     resetErrors,
-    validate: (data: string) => {
+    validate: async (data: string) => {
       try {
         setIsValidating(true);
         const parsed = JSON.parse(data);
-        validate.execute(
-          { label_schemas: { [field]: parsed } },
-          {
-            skipErrorNotification: true,
-            callback: (result) => {
-              if (result.result.errors) {
-                setErrors(result.result.errors);
-              }
+        const result = await validateSchemas({
+          label_schemas: { [field]: parsed },
+        });
 
-              if (!result.result.errors.length) {
-                setCurrent(parsed);
-                setIsValid(true);
-                document.dispatchEvent(
-                  new CustomEvent("schema-manager-valid-json")
-                );
-              } else {
-                setIsValid(false);
-                document.dispatchEvent(
-                  new CustomEvent("schema-manager-invalid-json")
-                );
-              }
-              setIsValidating(false);
-            },
-          }
-        );
+        if (result.errors) {
+          setErrors(result.errors);
+        }
+
+        if (!result.errors?.length) {
+          setCurrent(parsed);
+          setIsValid(true);
+          dispatchSchemaManagerEvent(dispatch, "schema-manager:valid-json");
+        } else {
+          setIsValid(false);
+          dispatchSchemaManagerEvent(dispatch, "schema-manager:invalid-json");
+        }
       } catch (e) {
         if (e instanceof SyntaxError) {
           setErrors([e.message]);
         }
-
-        setIsValidating(false);
         setIsValid(false);
+      } finally {
+        setIsValidating(false);
       }
     },
   };
@@ -271,20 +384,53 @@ export default function useLabelSchema(field: string) {
   const readOnly = useReadOnly(field);
   const configUpdate = useConfigUpdate(field);
   const scan = useScan(field);
-  const save = useSave(field);
+  const visibility = useVisibility(field);
+  const save = useSave(field, visibility.visibilityChanged);
   const validate = useValidate(field);
-  const hasChanges = useHasChanges(
+  const schemaChanged = useHasChanges(
     validate.currentLabelSchema,
-    save.savedLabelSchema
+    save.savedLabelSchema,
   );
 
+  const hasChanges =
+    schemaChanged || !!validate.errors.length || visibility.visibilityChanged;
+
+  // Discard unsaved schema edits when navigating away (back button unmounts
+  // this view). Visibility is local state so it resets automatically on unmount.
+  // After a successful save, savedLabelSchema is already updated before unmount,
+  // so re-opening the field will show the saved state correctly.
+  useEffect(() => {
+    return () => {
+      currentLabelSchema.remove(field);
+    };
+  }, [field]);
+
+  // Wrap discard to also revert visibility
+  const originalDiscard = validate.discard;
+  const discard = useCallback(() => {
+    originalDiscard();
+    visibility.discardVisibility();
+  }, [originalDiscard, visibility.discardVisibility]);
+
+  // The currentLabelSchema atom is typed as `object | undefined` because it
+  // is fed into both <GUIContent> (which wants the looser SchemaConfigType)
+  // and <JSONEditor> (which wants JSONValue). We narrow it here once so
+  // consumers can read `labelSchema.appliedOntology` without casting.
+  const appliedOntology = (
+    validate.currentLabelSchema as FieldSchema | undefined
+  )?.applied_ontology;
+
   return {
-    hasChanges: hasChanges || !!validate.errors.length,
+    hasChanges,
+    isFieldVisible: visibility.isFieldVisible,
+    toggleVisibility: visibility.toggleVisibility,
 
     ...readOnly,
     ...configUpdate,
     ...save,
     ...scan,
     ...validate,
+    appliedOntology,
+    discard,
   };
 }

@@ -14,12 +14,12 @@ import {
   plus,
 } from "../../icons";
 import { BaseState } from "../../state";
+import { json } from "../../shared/actions";
 import { BaseElement, Events } from "../base";
 import {
   cropToContent,
   downloadMedia,
   help,
-  json,
   settings,
   toggleOverlays,
   zoomIn,
@@ -33,10 +33,8 @@ import {
 } from "./controls.module.css";
 
 export class ControlsElement<
-  State extends BaseState
+  State extends BaseState,
 > extends BaseElement<State> {
-  private showControls: boolean = false;
-
   getEvents(): Events<State> {
     return {
       mouseenter: ({ update }) => {
@@ -75,13 +73,12 @@ export class ControlsElement<
       this.element.style.opacity = "0.0";
       this.element.style.height = "0";
     }
-    this.showControls = showControls;
     return this.element;
   }
 }
 
 export class ToggleOverlaysButtonElement<
-  State extends BaseState
+  State extends BaseState,
 > extends BaseElement<State, HTMLImageElement> {
   private overlaysVisible: boolean;
 
@@ -187,7 +184,7 @@ export class MinusElement<State extends BaseState> extends BaseElement<
 }
 
 export class HelpButtonElement<
-  State extends BaseState
+  State extends BaseState,
 > extends BaseElement<State> {
   private active: boolean;
 
@@ -226,7 +223,7 @@ export class HelpButtonElement<
 }
 
 export class OptionsButtonElement<
-  State extends BaseState
+  State extends BaseState,
 > extends BaseElement<State> {
   private active: boolean;
 
@@ -265,7 +262,7 @@ export class OptionsButtonElement<
 }
 
 export class CropToContentButtonElement<
-  State extends BaseState
+  State extends BaseState,
 > extends BaseElement<State> {
   private disabled: boolean;
 
@@ -301,7 +298,7 @@ export class CropToContentButtonElement<
 }
 
 export class JSONButtonElement<
-  State extends BaseState
+  State extends BaseState,
 > extends BaseElement<State> {
   private disabled: boolean;
   private active: boolean;
@@ -346,7 +343,7 @@ export class JSONButtonElement<
 }
 
 export class DownloadButtonElement<
-  State extends BaseState
+  State extends BaseState,
 > extends BaseElement<State> {
   private spinning = false;
   private timeoutId: ReturnType<typeof setTimeout> | null = null;

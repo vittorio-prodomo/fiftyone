@@ -1,271 +1,111 @@
-import type { Sample } from "@fiftyone/looker";
-import type { AnnotationLabel } from "@fiftyone/state";
-import type { Field } from "@fiftyone/utilities";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { OpType } from "../types";
-import { handleLabelPersistence } from "./labelPersistence";
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ */
 
-vi.mock("../deltas", () => ({
-  buildJsonPath: vi.fn(),
-  buildLabelDeltas: vi.fn(),
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@fiftyone/core/src/client", () => {
+  class VersionMismatchError extends Error {
+    constructor(
+      message?: string,
+      readonly responseBody?: Record<string, unknown>,
+      readonly versionToken?: string,
+    ) {
+      super(message);
+      this.name = "Version Mismatch Error";
+    }
+  }
+
+  return {
+    patchSample: vi.fn(),
+    transformSampleData: (sample: Record<string, unknown>) => sample,
+    VersionMismatchError,
+  };
+});
+
+vi.mock("@fiftyone/looker/src/util", () => ({
+  isSampleIsh: () => true,
 }));
 
-import { buildJsonPath, buildLabelDeltas } from "../deltas";
+import { patchSample, VersionMismatchError } from "@fiftyone/core/src/client";
+import type { Sample } from "@fiftyone/looker";
+import {
+  clearSampleVersions,
+  resolveSampleVersionToken,
+} from "./sampleVersionTokens";
+import { doPatchSample } from "./labelPersistence";
 
-describe("handleLabelPersistence", () => {
-  let mockPatchSample: ReturnType<typeof vi.fn>;
-  let mockSample: Sample;
-  let mockAnnotationLabel: AnnotationLabel;
-  let mockSchema: Field;
-  let mockOpType: OpType;
+const LOADED = new Date("2026-09-09T14:16:24.457Z");
+const WRITTEN = new Date("2026-09-09T14:16:32.520Z");
 
+const serverSample = (id: string, lastModifiedAt: Date) => ({
+  _id: id,
+  _media_type: "image",
+  filepath: "/tmp/image.png",
+  last_modified_at: { datetime: lastModifiedAt.getTime() },
+});
+
+const makeArgs = (id: string) => {
+  const sample = serverSample(id, LOADED) as unknown as Sample;
+
+  return {
+    sample,
+    datasetId: "dataset-1",
+    getVersionToken: () => resolveSampleVersionToken({ sample }),
+    refreshSample: vi.fn(),
+    sampleDeltas: [{ op: "replace", path: "/label", value: "cat" }] as never,
+  };
+};
+
+describe("doPatchSample version token", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    clearSampleVersions();
+    vi.mocked(patchSample).mockReset();
+  });
 
-    mockPatchSample = vi.fn().mockResolvedValue(true);
-    mockSample = { id: "sample-id" } as Sample;
-    mockAnnotationLabel = {
-      path: "predictions.detections",
-      id: "label-id",
-    } as AnnotationLabel;
-    mockSchema = { name: "detections" } as Field;
-    mockOpType = "mutate";
+  it("sends the loaded token when nothing newer has been confirmed", async () => {
+    const args = makeArgs("first-write");
+    vi.mocked(patchSample).mockResolvedValue({
+      sample: serverSample("first-write", WRITTEN) as unknown as Sample,
+      versionToken: "etag",
+    });
 
-    vi.mocked(buildLabelDeltas).mockReturnValue([]);
-    vi.mocked(buildJsonPath).mockImplementation(
-      (basePath, deltaPath) => `${basePath}.${deltaPath}`
+    await doPatchSample(args);
+
+    expect(patchSample).toHaveBeenCalledWith(
+      expect.objectContaining({ versionToken: "2026-09-09T14:16:24.457" }),
     );
   });
 
-  it("should return false when sample is null", async () => {
-    const result = await handleLabelPersistence({
-      sample: null,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
+  it("records the written version so the next write does not reuse the loaded token", async () => {
+    const args = makeArgs("second-write");
+    vi.mocked(patchSample).mockResolvedValue({
+      sample: serverSample("second-write", WRITTEN) as unknown as Sample,
+      versionToken: "etag",
     });
 
-    expect(result).toBe(false);
-    expect(mockPatchSample).not.toHaveBeenCalled();
+    await doPatchSample(args);
+    await doPatchSample(args);
+
+    // the token is the ETag the server issued, not one derived from the
+    // sample the app still holds
+    expect(vi.mocked(patchSample).mock.calls[1][0].versionToken).toBe("etag");
   });
 
-  it("should return false when annotationLabel is null", async () => {
-    const result = await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: null,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(result).toBe(false);
-    expect(mockPatchSample).not.toHaveBeenCalled();
-  });
-
-  it("should call buildLabelDeltas with correct arguments", async () => {
-    vi.mocked(buildLabelDeltas).mockReturnValue([
-      { path: "label", value: "cat", op: "replace" },
-    ]);
-
-    await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(buildLabelDeltas).toHaveBeenCalledWith(
-      mockSample,
-      mockAnnotationLabel,
-      mockSchema,
-      mockOpType
+  it("records the server's version from a 412 body", async () => {
+    const args = makeArgs("mismatch");
+    vi.mocked(patchSample).mockRejectedValueOnce(
+      new VersionMismatchError(
+        "Invalid version token",
+        serverSample("mismatch", WRITTEN),
+        "etag",
+      ),
     );
-  });
 
-  it("should transform label deltas to sample deltas", async () => {
-    const mockDeltas = [
-      { path: "label", value: "cat", op: "replace" },
-      { path: "confidence", value: 0.95, op: "replace" },
-    ];
-
-    vi.mocked(buildLabelDeltas).mockReturnValue(mockDeltas);
-    vi.mocked(buildJsonPath)
-      .mockReturnValueOnce("predictions.detections.label")
-      .mockReturnValueOnce("predictions.detections.confidence");
-
-    await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(buildJsonPath).toHaveBeenCalledTimes(2);
-    expect(buildJsonPath).toHaveBeenNthCalledWith(
-      1,
-      "predictions.detections",
-      "label"
+    await expect(doPatchSample(args)).rejects.toBeInstanceOf(
+      VersionMismatchError,
     );
-    expect(buildJsonPath).toHaveBeenNthCalledWith(
-      2,
-      "predictions.detections",
-      "confidence"
-    );
-  });
-
-  it("should call patchSample with transformed deltas", async () => {
-    const mockDeltas = [{ path: "label", value: "dog", op: "replace" }];
-
-    vi.mocked(buildLabelDeltas).mockReturnValue(mockDeltas);
-    vi.mocked(buildJsonPath).mockReturnValue("predictions.detections.label");
-
-    await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(mockPatchSample).toHaveBeenCalledWith([
-      {
-        path: "predictions.detections.label",
-        value: "dog",
-        op: "replace",
-      },
-    ]);
-  });
-
-  it("should return true when patchSample succeeds", async () => {
-    vi.mocked(buildLabelDeltas).mockReturnValue([
-      { path: "label", value: "cat", op: "replace" },
-    ]);
-    mockPatchSample.mockResolvedValue(true);
-
-    const result = await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(result).toBe(true);
-  });
-
-  it("should return false when patchSample fails", async () => {
-    vi.mocked(buildLabelDeltas).mockReturnValue([
-      { path: "label", value: "cat", op: "replace" },
-    ]);
-    mockPatchSample.mockResolvedValue(false);
-
-    const result = await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(result).toBe(false);
-  });
-
-  it("should handle empty deltas array", async () => {
-    vi.mocked(buildLabelDeltas).mockReturnValue([]);
-
-    const result = await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(mockPatchSample).toHaveBeenCalledWith([]);
-    expect(result).toBe(true);
-  });
-
-  it("should handle multiple deltas correctly", async () => {
-    const mockDeltas = [
-      { path: "label", value: "cat", op: "replace" },
-      { path: "confidence", value: 0.95, op: "replace" },
-      { path: "bounding_box", value: [0, 0, 100, 100], op: "replace" },
-    ];
-
-    vi.mocked(buildLabelDeltas).mockReturnValue(mockDeltas);
-    vi.mocked(buildJsonPath)
-      .mockReturnValueOnce("predictions.detections.label")
-      .mockReturnValueOnce("predictions.detections.confidence")
-      .mockReturnValueOnce("predictions.detections.bounding_box");
-
-    await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(mockPatchSample).toHaveBeenCalledWith([
-      { path: "predictions.detections.label", value: "cat", op: "replace" },
-      { path: "predictions.detections.confidence", value: 0.95, op: "replace" },
-      {
-        path: "predictions.detections.bounding_box",
-        value: [0, 0, 100, 100],
-        op: "replace",
-      },
-    ]);
-  });
-
-  it("should propagate errors from patchSample", async () => {
-    vi.mocked(buildLabelDeltas).mockReturnValue([
-      { path: "label", value: "cat", op: "replace" },
-    ]);
-    const error = new Error("Network error");
-    mockPatchSample.mockRejectedValue(error);
-
-    await expect(
-      handleLabelPersistence({
-        sample: mockSample,
-        applyPatch: mockPatchSample,
-        annotationLabel: mockAnnotationLabel,
-        schema: mockSchema,
-        opType: mockOpType,
-      })
-    ).rejects.toThrow("Network error");
-  });
-
-  it("should preserve all delta properties when transforming", async () => {
-    const mockDeltas = [
-      {
-        path: "label",
-        value: "cat",
-        op: "replace",
-        customProp: "custom-value",
-      },
-    ];
-
-    vi.mocked(buildLabelDeltas).mockReturnValue(mockDeltas);
-    vi.mocked(buildJsonPath).mockReturnValue("predictions.detections.label");
-
-    await handleLabelPersistence({
-      sample: mockSample,
-      applyPatch: mockPatchSample,
-      annotationLabel: mockAnnotationLabel,
-      schema: mockSchema,
-      opType: mockOpType,
-    });
-
-    expect(mockPatchSample).toHaveBeenCalledWith([
-      {
-        path: "predictions.detections.label",
-        value: "cat",
-        op: "replace",
-        customProp: "custom-value",
-      },
-    ]);
+    expect(args.refreshSample).toHaveBeenCalledOnce();
+    expect(args.getVersionToken()).toBe("etag");
   });
 });

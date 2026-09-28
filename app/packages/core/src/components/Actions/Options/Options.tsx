@@ -4,9 +4,10 @@ import {
   TabOption,
   useTheme,
 } from "@fiftyone/components";
-import { Slider } from "@mui/material";
 import * as fos from "@fiftyone/state";
 import { groupStatistics } from "@fiftyone/state";
+import { SingleValueSlider } from "@voxel51/voodo";
+import { useAtomValue } from "jotai";
 import type { RefObject } from "react";
 import { default as React, useMemo } from "react";
 import {
@@ -25,11 +26,11 @@ import RadioGroup from "../../Common/RadioGroup";
 import { gridAutosizing, maxGridItemsSizeBytes } from "../../Grid/recoil";
 import { ActionOption } from "../Common";
 import Popout from "../Popout";
-import { useAtomValue } from "jotai";
+import MultimodalGridFitSetting from "./MultimodalGridFitSetting";
 
 const SortFilterResults = ({ modal }) => {
   const [{ count, asc }, setSortFilterResults] = useRecoilState(
-    fos.sortFilterResults(modal)
+    fos.sortFilterResults(modal),
   );
   const queryPerformance = useRecoilValue(fos.queryPerformance);
   if (queryPerformance) {
@@ -85,32 +86,24 @@ const Patches = ({ modal }: { modal: boolean }) => {
 };
 
 const ZoomPad = ({ modal }: { modal: boolean }) => {
-  const isPatches = useRecoilValue(fos.isPatchesView);
-  const crop = useRecoilValue(fos.cropToContent(modal));
-  const [zoomPad, setZoomPad] = useRecoilState(fos.zoomPad(modal));
-  const theme = useTheme();
+  const zoomPad = fos.useZoomPad(modal);
+  const setZoomPad = fos.useSetZoomPad(modal);
 
-  if (!isPatches || !crop) {
+  if (zoomPad === null) {
     return null;
   }
 
   return (
     <>
       <PopoutSectionTitle>Zoom padding</PopoutSectionTitle>
-      <Slider
+      <SingleValueSlider
         value={zoomPad}
-        onChange={(_e: Event, value: number | number[]) =>
-          setZoomPad(value as number)
-        }
+        onChange={setZoomPad}
         min={0}
         max={0.5}
         step={0.05}
-        valueLabelDisplay="auto"
-        valueLabelFormat={(v: number) => v.toFixed(2)}
-        sx={{
-          color: theme.primary.main,
-          margin: "0 0.5rem",
-        }}
+        knobLabel
+        aria-label="Zoom padding"
       />
     </>
   );
@@ -118,7 +111,7 @@ const ZoomPad = ({ modal }: { modal: boolean }) => {
 
 const MediaFields = ({ modal }) => {
   const [selectedMediaField, setSelectedMediaField] = useRecoilState(
-    fos.selectedMediaField(modal)
+    fos.selectedMediaField(modal),
   );
   const mediaFields = useRecoilValue(fos.mediaFields);
 
@@ -160,10 +153,10 @@ const DynamicGroupsViewMode = ({ modal }: { modal: boolean }) => {
 
   const [mode, setMode] = useRecoilState(fos.dynamicGroupsViewMode(modal));
   const setIsCarouselVisible = useSetRecoilState(
-    fos.groupMediaIsCarouselVisibleSetting
+    fos.groupMediaIsCarouselVisibleSetting,
   );
   const setIsMainVisible = useSetRecoilState(
-    fos.groupMediaIsMain2DViewerVisibleSetting
+    fos.groupMediaIsMain2DViewerVisibleSetting,
   );
 
   const tabOptions = useMemo(() => {
@@ -229,7 +222,7 @@ const QueryPerformance = () => {
   const theme = useTheme();
   const [enabled, setEnabled] = useRecoilState(fos.queryPerformance);
   const [maxSearch, setMaxSearch] = useRecoilState(
-    fos.queryPerformanceMaxSearch
+    fos.queryPerformanceMaxSearch,
   );
   const resetMaxSearch = useResetRecoilState(fos.queryPerformanceMaxSearch);
   if (!useRecoilValue(fos.enableQueryPerformanceConfig)) {
@@ -387,6 +380,7 @@ const Grid = () => {
 
   return (
     <>
+      <MultimodalGridFitSetting />
       <ActionOption
         id="grid-options"
         href={MANAGING_GRID_MEMORY}
@@ -456,21 +450,24 @@ const Options = ({ modal, anchorRef }: OptionsProps) => {
   const view = useRecoilValue(fos.view);
   const mode = useAtomValue(fos.modalMode);
 
+  const exploreWithModal = modal && mode === fos.EXPLORE;
+  const annotateWithModal = modal && mode === fos.ANNOTATE;
+
   return (
     <Popout modal={modal} fixed anchorRef={anchorRef}>
-      {modal && mode === fos.EXPLORE && <HideFieldSetting />}
+      {exploreWithModal && <HideFieldSetting />}
       {modal && <ShowModalNav />}
-      {mode === fos.EXPLORE && isDynamicGroup && (
+      {!annotateWithModal && isDynamicGroup && (
         <DynamicGroupsViewMode modal={!!modal} />
       )}
-      {mode === fos.EXPLORE && isGroup && !isDynamicGroup && (
+      {!annotateWithModal && isGroup && !isDynamicGroup && (
         <GroupStatistics modal={modal} />
       )}
-      {mode === fos.EXPLORE && <MediaFields modal={modal} />}
-      {mode === fos.EXPLORE && <Patches modal={!!modal} />}
-      {mode === fos.EXPLORE && <ZoomPad modal={!!modal} />}
-      {mode === fos.EXPLORE && !view?.length && <QueryPerformance />}
-      {mode === fos.EXPLORE && <SortFilterResults modal={modal} />}
+      {!annotateWithModal && <MediaFields modal={modal} />}
+      {!annotateWithModal && <Patches modal={!!modal} />}
+      {!annotateWithModal && <ZoomPad modal={!!modal} />}
+      {!annotateWithModal && !view?.length && <QueryPerformance />}
+      {!annotateWithModal && <SortFilterResults modal={modal} />}
       {!modal && <Grid />}
     </Popout>
   );

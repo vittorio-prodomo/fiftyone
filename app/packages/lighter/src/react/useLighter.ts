@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef } from "react";
 import type { TransformOptions } from "../commands/TransformOverlayCommand";
 import type { RenderCallback } from "../core/Scene2D";
 import { lighterSceneAtom, overlayFactory } from "../index";
-import { BaseOverlay } from "../overlay/BaseOverlay";
+import type { BaseOverlay } from "../overlay/BaseOverlay";
 
 /**
  * Hook for accessing the current lighter instance without side effects.
@@ -46,14 +46,17 @@ export const useLighter = () => {
         sceneRef.current.addOverlay(overlay, withUndo);
       }
     },
-    []
+    [],
   );
 
-  const removeOverlay = useCallback((id: string, withUndo: boolean = false) => {
-    if (sceneRef.current) {
-      sceneRef.current.removeOverlay(id, withUndo);
-    }
-  }, []);
+  const removeOverlay = useCallback(
+    (id: string, withUndo: boolean = false, lifecycle: boolean = false) => {
+      if (sceneRef.current) {
+        sceneRef.current.removeOverlay(id, withUndo, lifecycle);
+      }
+    },
+    [],
+  );
 
   const getOverlay = useCallback((id: string) => {
     if (sceneRef.current) {
@@ -69,7 +72,7 @@ export const useLighter = () => {
       }
       return false;
     },
-    []
+    [],
   );
 
   /**
@@ -95,8 +98,16 @@ export const useLighter = () => {
         unregister();
       };
     },
-    []
+    [],
   );
+
+  const zoomIn = useCallback(() => {
+    sceneRef.current?.zoomIn();
+  }, []);
+
+  const zoomOut = useCallback(() => {
+    sceneRef.current?.zoomOut();
+  }, []);
 
   return {
     scene,
@@ -107,5 +118,7 @@ export const useLighter = () => {
     transformOverlay,
     overlayFactory,
     registerRenderCallback,
+    zoomIn,
+    zoomOut,
   };
 };

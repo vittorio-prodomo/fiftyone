@@ -1,7 +1,7 @@
 import { getImageElements } from "../elements";
 import { COMMON_SHORTCUTS } from "../elements/common";
 import type { Overlay } from "../overlays/base";
-import type { ImageState } from "../state";
+import type { Coordinates, ImageState } from "../state";
 import { DEFAULT_IMAGE_OPTIONS } from "../state";
 import { AbstractLooker } from "./abstract";
 import { LookerUtils } from "./shared";
@@ -24,7 +24,7 @@ export class ImageLooker extends AbstractLooker<ImageState> {
 
   getInitialState(
     config: ImageState["config"],
-    options: ImageState["options"]
+    options: ImageState["options"],
   ) {
     const resolved = {
       ...this.getDefaultOptions(),
@@ -79,10 +79,17 @@ export class ImageLooker extends AbstractLooker<ImageState> {
     if (this.state.zoomToContent) {
       LookerUtils.toggleZoom(this.state, this.currentOverlays);
     } else if (this.state.setZoom && this.state.overlaysPrepared) {
-      if (this.state.options.zoom) {
+      if (this.state.options.initialViewport) {
+        this.state.scale = this.state.options.initialViewport.scale;
+        this.state.pan = [
+          this.state.options.initialViewport.panX,
+          this.state.options.initialViewport.panY,
+        ] as Coordinates;
+        this.state.options = { ...this.state.options, initialViewport: null };
+      } else if (this.state.options.zoom) {
         const filtered = filterOverlaysForZoom(
           this.state.config.view,
-          this.pluckedOverlays
+          this.pluckedOverlays,
         );
         this.state = zoomToContent(this.state, filtered);
       } else {
@@ -98,7 +105,7 @@ export class ImageLooker extends AbstractLooker<ImageState> {
 
   updateOptions(
     options: Partial<ImageState["options"]>,
-    disableReload = false
+    disableReload = false,
   ) {
     const reload =
       !disableReload &&

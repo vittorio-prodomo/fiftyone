@@ -11,6 +11,7 @@ import {
   NotFoundError,
 } from "@fiftyone/utilities";
 import * as jsonpatch from "fast-json-patch";
+import { toExtendedJson } from "./transformer";
 import { encodeURIPath, parseETag } from "./util";
 
 /**
@@ -25,10 +26,41 @@ export type PatchSampleRequest = {
   versionToken: string;
   path?: string;
   labelId?: string;
+  generatedDatasetName?: string;
+  generatedSampleId?: string;
 };
 
 export type ErrorResponse = {
   errors: string[];
+};
+
+/** One member's JSON-patch within a dynamic-group write. */
+export type DynamicGroupMemberPatch = {
+  sampleId: string;
+  patch: JSONDeltas;
+};
+
+export type PatchDynamicGroupRequest = {
+  datasetId: string;
+  /** The dynamic group's key value (same shape `/frames` accepts). */
+  dynamicGroup: string;
+  /** Serialized view stages that define the grouping. */
+  view: unknown[];
+  patches: DynamicGroupMemberPatch[];
+  /** The group version token, `"<max last_modified_at ISO>|<count>"`. */
+  versionToken: string;
+};
+
+export type PatchDynamicGroupResponse = {
+  samples: Sample[];
+  versionToken: string | null;
+};
+
+/** The fresh group state a dynamic-group 412 carries, in frame order. */
+export type DynamicGroupMismatchBody = {
+  members: { id: string; last_modified_at: string }[];
+  /** Members the rejected request had already written, if any. */
+  written?: string[];
 };
 
 export type PatchSampleResponse = {
@@ -47,19 +79,14 @@ export class PatchApplicationError extends Error {
 }
 
 /**
- * Error resulting from a version mismatch.
- *
- * When attempting to patch a sample, the server validates the provided version
- * token and rejects the update if there is a version mismatch.
- *
- * The updated sample data is provided in the response body, and a current
- * version token is provided in the ETag header.
+ * Error for a PATCH rejected because its version token is stale. The response
+ * body carries the current sample data and the ETag header the current token.
  */
 export class VersionMismatchError extends Error {
   constructor(
     message?: string,
     readonly responseBody?: Record<string, unknown>,
-    readonly versionToken?: string
+    readonly versionToken?: string,
   ) {
     super(message);
     this.name = "Version Mismatch Error";
@@ -67,11 +94,8 @@ export class VersionMismatchError extends Error {
 }
 
 /**
- * Mapping of response code => error handler.
- *
- * These handlers are intended to be specific to known domain errors for the
- * annotation endpoints. For all other response codes, default error handling
- * is sufficient.
+ * Mapping of response code => error handler for the annotation endpoints'
+ * known domain errors. Other codes use default error handling.
  */
 const errorHandlers: Record<number, (response: Response) => Promise<void>> = {
   // bad request
@@ -87,12 +111,16 @@ const errorHandlers: Record<number, (response: Response) => Promise<void>> = {
       }
     } catch (err) {
       // doesn't look like a list of errors
+      console.error("unparsable error:", err);
     }
     if (errorResponse?.errors) {
+      console.error("Patch application errors:", errorResponse.errors);
       throw new PatchApplicationError(errorResponse.errors.join(", "));
     }
 
-    throw new MalformedRequestError();
+    throw new MalformedRequestError(
+      "Unexpected error response. See console for details.",
+    );
   },
 
   // sample not found
@@ -113,7 +141,7 @@ const errorHandlers: Record<number, (response: Response) => Promise<void>> = {
     throw new VersionMismatchError(
       "Invalid version token",
       responseBody,
-      parseETag(response.headers.get("ETag"))
+      parseETag(response.headers.get("ETag")),
     );
   },
 };
@@ -124,7 +152,7 @@ const errorHandlers: Record<number, (response: Response) => Promise<void>> = {
  * @param config fetch configuration
  */
 const doFetch = <A, R>(
-  config: Omit<FetchFunctionConfig<A>, "errorHandler">
+  config: Omit<FetchFunctionConfig<A>, "errorHandler">,
 ): Promise<FetchFunctionResult<R>> => {
   return getFetchFunctionExtended()({
     errorHandler: (response) => errorHandlers[response.status]?.(response),
@@ -138,17 +166,47 @@ const doFetch = <A, R>(
  * @param request Patch sample request
  */
 export const patchSample = async (
-  request: PatchSampleRequest
+  request: PatchSampleRequest,
 ): Promise<PatchSampleResponse> => {
+  // Build the base path for the request.
   const pathParts = ["dataset", request.datasetId, "sample", request.sampleId];
+
+  // Use the sampleField endpoint for field-level updates (eg detection in patchesView)
   if (request.path && request.labelId) {
     pathParts.push(request.path, request.labelId);
   }
 
+  // Add generated dataset and label ids as query parameter if present
+  // This enables syncing changes from the source to the currently loaded generated dataset.
+  // We do this instead of making a separate request with the generated dataset _id
+  // because we want to ensure permissions are checked against the src dataset.
+  const queryParams = new URLSearchParams();
+  if (request.generatedDatasetName) {
+    if (
+      !request.generatedSampleId ||
+      request.generatedSampleId === request.sampleId
+    ) {
+      throw new Error(
+        "generatedSampleId is required and must be different from sampleId when generatedDatasetName is provided",
+      );
+    }
+    queryParams.set("generated_dataset", request.generatedDatasetName);
+    queryParams.set("generated_sample_id", request.generatedSampleId);
+  }
+
+  const queryString = queryParams.toString();
+  const pathWithQuery = queryString
+    ? `${encodeURIPath(pathParts)}?${queryString}`
+    : encodeURIPath(pathParts);
+
+  const deltas = request.deltas.map((delta) =>
+    "value" in delta ? { ...delta, value: toExtendedJson(delta.value) } : delta,
+  );
+
   const response = await doFetch<JSONDeltas, Sample>({
-    path: encodeURIPath(pathParts),
+    path: pathWithQuery,
     method: "PATCH",
-    body: request.deltas,
+    body: deltas,
     headers: {
       "Content-Type": "application/json-patch+json",
       "If-Match": `"${request.versionToken}"`,
@@ -157,6 +215,48 @@ export const patchSample = async (
 
   return {
     sample: response.response,
+    versionToken: parseETag(response.headers.get("ETag")),
+  };
+};
+
+/**
+ * Patch members of a dynamic group under a single group version token. A
+ * stale token throws {@link VersionMismatchError} carrying a fresh token and
+ * a {@link DynamicGroupMismatchBody}.
+ *
+ * @param request Patch dynamic group request
+ */
+export const patchDynamicGroup = async (
+  request: PatchDynamicGroupRequest,
+): Promise<PatchDynamicGroupResponse> => {
+  const patches = request.patches.map(({ sampleId, patch }) => ({
+    sampleId,
+    patch: patch.map((delta) =>
+      "value" in delta
+        ? { ...delta, value: toExtendedJson(delta.value) }
+        : delta,
+    ),
+  }));
+
+  const response = await doFetch<
+    { dynamicGroup: string; view: unknown[]; patches: typeof patches },
+    { samples: Sample[] }
+  >({
+    path: encodeURIPath(["dataset", request.datasetId, "dynamic-group"]),
+    method: "PATCH",
+    body: {
+      dynamicGroup: request.dynamicGroup,
+      view: request.view,
+      patches,
+    },
+    headers: {
+      "Content-Type": "application/json",
+      "If-Match": `"${request.versionToken}"`,
+    },
+  });
+
+  return {
+    samples: response.response.samples,
     versionToken: parseETag(response.headers.get("ETag")),
   };
 };

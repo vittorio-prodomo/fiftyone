@@ -79,8 +79,13 @@ async def _serve(config):
         await stop.wait()
         # sse_starlette only ends its streams on uvicorn's exit signal, and on
         # Python >= 3.12 hypercorn's shutdown awaits every open connection
-        # (hypercorn#308): without this an open App tab blocks exit forever
+        # (hypercorn#308): without this an open App tab blocks exit forever.
+        # sse_starlette 0.x and 3.x poll the flag, while 1.x and 2.x wait on
+        # an event that only wakes if it is set too
         AppStatus.should_exit = True
+        should_exit_event = getattr(AppStatus, "should_exit_event", None)
+        if should_exit_event is not None:
+            should_exit_event.set()
 
     await serve(app, config, shutdown_trigger=shutdown_trigger)
 

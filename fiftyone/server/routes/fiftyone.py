@@ -5,6 +5,7 @@ FiftyOne Server /fiftyone route
 | `voxel51.com <https://voxel51.com/>`_
 |
 """
+
 from starlette.endpoints import HTTPEndpoint
 from starlette.requests import Request
 
@@ -15,8 +16,8 @@ from fiftyone.server.decorators import route
 
 
 class FiftyOne(HTTPEndpoint):
-    @route
-    async def get(self, request: Request, data: dict) -> dict:
+    @route(parse_body=False)
+    async def get(self, _request: Request) -> dict:
         return {
             "version": foc.VERSION,
             "dev": foc.DEV_INSTALL or foc.RC_INSTALL,

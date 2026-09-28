@@ -1,0 +1,199 @@
+/**
+ * Worker that fetches `/frames` chunks plus their images and decodes them to
+ * transferable ImageBitmaps for `DynamicGroupImageStream`. Messages to the main
+ * thread follow {@link ./frameWorkerProtocol}; `init` installs the main
+ * thread's fetch configuration, and token refresh is not supported.
+ */
+
+/// <reference lib="webworker" />
+
+import { setFetchFunction } from "@fiftyone/utilities";
+import {
+  getFrames,
+  type GetFramesRequest,
+} from "../../../core/src/client/framesClient";
+import type {
+  FrameWorkerOutbound,
+  InitMessage as BaseInitMessage,
+} from "./frameWorkerProtocol";
+
+/** Source-specific `init` for the `/frames` worker: the fetch context. */
+interface InitMessage extends BaseInitMessage {
+  origin: string;
+  pathPrefix: string;
+  headers: Record<string, string>;
+}
+
+interface FetchChunkMessage {
+  type: "fetchChunk";
+  reqId: number;
+  request: GetFramesRequest;
+}
+
+type InboundMessage = InitMessage | FetchChunkMessage;
+
+let initialized = false;
+let origin = "";
+let pathPrefix = "";
+
+self.addEventListener("message", (event: MessageEvent<InboundMessage>) => {
+  const msg = event.data;
+
+  switch (msg.type) {
+    case "init":
+      // Install the fetch singleton inside the worker's module scope.
+      // Subsequent `getFrames` calls in this worker pick up the configured
+      // origin / headers / pathPrefix.
+      origin = msg.origin;
+      pathPrefix = msg.pathPrefix;
+      setFetchFunction(msg.origin, msg.headers ?? {}, msg.pathPrefix);
+      initialized = true;
+      break;
+
+    case "fetchChunk":
+      if (!initialized) {
+        postFailed(msg.reqId, "framesWorker received fetchChunk before init");
+        return;
+      }
+      void handleFetchChunk(msg);
+      break;
+  }
+});
+
+async function handleFetchChunk(msg: FetchChunkMessage): Promise<void> {
+  let frames: Awaited<ReturnType<typeof getFrames>>;
+  try {
+    frames = await getFrames(msg.request);
+  } catch (error) {
+    postFailed(msg.reqId, errorMessage(error));
+    return;
+  }
+
+  // Kick off every frame's fetch+decode in parallel; post each one as
+  // soon as it's ready so the main-thread cache fills incrementally.
+  const mediaField =
+    (msg.request as { mediaField?: string })?.mediaField ?? "filepath";
+
+  // A dynamic group's documents are real samples, served as stored: the
+  // i-th one is frame `range[0] + i`. A video's frame documents carry their
+  // own number.
+  const [rangeStart] = frames.range;
+  await Promise.all(
+    frames.frames.map((frame, i) =>
+      decodeAndDispatch(
+        msg.reqId,
+        frame,
+        mediaField,
+        msg.request.dynamicGroup ? rangeStart + i : frame.frame_number,
+      ),
+    ),
+  );
+
+  postOutbound({
+    type: "chunkDone",
+    reqId: msg.reqId,
+    range: frames.range,
+  });
+}
+
+async function decodeAndDispatch(
+  reqId: number,
+  frame: { frame_number: number; media_url?: string } & Record<string, unknown>,
+  mediaField: string,
+  frameNumber: number,
+): Promise<void> {
+  const mediaPath = frame[mediaField];
+  if (!mediaPath || typeof mediaPath !== "string") {
+    return;
+  }
+
+  // A downstream server may sign cloud media into `media_url`, leaving the
+  // media field's own value untouched for display
+  const src = resolveMediaSrc(
+    typeof frame.media_url === "string" ? frame.media_url : mediaPath,
+  );
+
+  let bitmap: ImageBitmap;
+  try {
+    // CORS fetch: createImageBitmap needs a non-opaque response. `cache:
+    // "reload"` bypasses an opaque entry a crossOrigin-less `<img>` load of the
+    // same URL may have cached, which would fail the CORS check here.
+    const r = await fetch(src, { mode: "cors", cache: "reload" });
+
+    if (!r.ok) {
+      throw new Error(`image fetch failed: ${r.status}`);
+    }
+
+    const blob = await r.blob();
+    bitmap = await createImageBitmap(blob);
+  } catch (error) {
+    // Skip — the main thread treats this frame as missing and re-requests it
+    // on a later prefetch tick, for a bounded number of attempts.
+    console.error(
+      `[framesWorker] decode failed for frame ${frameNumber}`,
+      error,
+    );
+
+    return;
+  }
+
+  postOutbound(
+    {
+      type: "frameReady",
+      reqId,
+      frameNumber,
+      bitmap,
+      width: bitmap.width,
+      height: bitmap.height,
+      // the header filename shows the media field's raw value, never a signed
+      // URL
+      meta: { src, filepath: mediaPath },
+    },
+    [bitmap],
+  );
+}
+
+/**
+ * Mirror of `@fiftyone/state`'s `getSampleSrc`: passthrough for absolute
+ * URLs / data: / blob: schemes; otherwise wrap as `/media?filepath=...`
+ * using the worker-resolved origin + pathPrefix (set on `init`).
+ */
+function resolveMediaSrc(filepath: string): string {
+  if (/^\w+:\/\//.test(filepath) || /^(data|blob):/.test(filepath)) {
+    return filepath;
+  }
+
+  return `${joinUrl(
+    origin,
+    pathPrefix,
+    "/media",
+  )}?filepath=${encodeURIComponent(filepath)}`;
+}
+
+function joinUrl(origin: string, pathPrefix: string, suffix: string): string {
+  return `${origin}${pathPrefix}${suffix}`.replace(/([^:]\/)\/+/g, "$1");
+}
+
+function postOutbound(
+  msg: FrameWorkerOutbound,
+  transfer?: Transferable[],
+): void {
+  // self.postMessage's typing varies by lib; the cast is to the worker
+  // DedicatedWorkerGlobalScope signature.
+  (self as unknown as DedicatedWorkerGlobalScope).postMessage(
+    msg,
+    transfer ?? [],
+  );
+}
+
+function postFailed(reqId: number, error: string): void {
+  postOutbound({ type: "chunkFailed", reqId, error });
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}

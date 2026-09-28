@@ -4,7 +4,6 @@
  * Displays the list of active (visible) fields with drag-drop reordering.
  */
 
-import { useOperatorExecutor } from "@fiftyone/operators";
 import type { ListItemProps } from "@voxel51/voodo";
 import {
   Anchor,
@@ -24,6 +23,7 @@ import {
 import { atom, useAtomValue } from "jotai";
 import { useCallback, useMemo } from "react";
 import { fieldAttributeCount, fieldType } from "../state";
+import { useSchemaManager } from "../useSchemaManager";
 import { Item } from "./Components";
 import {
   useActiveFieldsList,
@@ -80,20 +80,20 @@ const ActiveFieldsSection = () => {
     useMemo(
       () =>
         atom((get) =>
-          Object.fromEntries(fields.map((f) => [f, get(fieldType(f))]))
+          Object.fromEntries(fields.map((f) => [f, get(fieldType(f))])),
         ),
-      [fields]
-    )
+      [fields],
+    ),
   );
 
   const fieldReadOnlyStates = useAtomValue(
     useMemo(
       () =>
         atom((get) =>
-          Object.fromEntries(fields.map((f) => [f, get(fieldIsReadOnly(f))]))
+          Object.fromEntries(fields.map((f) => [f, get(fieldIsReadOnly(f))])),
         ),
-      [fields]
-    )
+      [fields],
+    ),
   );
 
   const fieldAttrCounts = useAtomValue(
@@ -101,15 +101,14 @@ const ActiveFieldsSection = () => {
       () =>
         atom((get) =>
           Object.fromEntries(
-            fields.map((f) => [f, get(fieldAttributeCount(f))])
-          )
+            fields.map((f) => [f, get(fieldAttributeCount(f))]),
+          ),
         ),
-      [fields]
-    )
+      [fields],
+    ),
   );
 
-  // Operator to persist field order to DB
-  const setActiveSchemas = useOperatorExecutor("set_active_label_schemas");
+  const { setActiveSchemas } = useSchemaManager();
 
   const listItems = useMemo(
     () =>
@@ -137,7 +136,7 @@ const ActiveFieldsSection = () => {
           ),
         } as ListItemProps,
       })),
-    [fields, fieldTypes, fieldAttrCounts, fieldReadOnlyStates]
+    [fields, fieldTypes, fieldAttrCounts, fieldReadOnlyStates],
   );
 
   const handleOrderChange = useCallback(
@@ -146,9 +145,9 @@ const ActiveFieldsSection = () => {
       // Update UI immediately
       setFields(newOrder);
       // Persist to DB
-      setActiveSchemas.execute({ fields: newOrder });
+      setActiveSchemas({ fields: newOrder });
     },
-    [setFields, setActiveSchemas]
+    [setFields, setActiveSchemas],
   );
 
   const handleSelected = useCallback(
@@ -156,7 +155,7 @@ const ActiveFieldsSection = () => {
       setSelected(new Set(selectedIds));
       setHiddenSelected(new Set());
     },
-    [setHiddenSelected, setSelected]
+    [setHiddenSelected, setSelected],
   );
 
   const selectedList = useMemo(() => Array.from(selected), [selected]);
@@ -175,7 +174,7 @@ const ActiveFieldsSection = () => {
           <Tooltip
             content={
               <Text>
-                Fields currently active and available for dataset annotation
+                Fields currently active and available in the "Annotate" tab
               </Text>
             }
             anchor={Anchor.Bottom}
@@ -213,7 +212,7 @@ const ActiveFieldsSection = () => {
         <Tooltip
           content={
             <Text>
-              Fields currently active and available for dataset annotation
+              Fields currently active and available in the "Annotate" tab
             </Text>
           }
           anchor={Anchor.Top}

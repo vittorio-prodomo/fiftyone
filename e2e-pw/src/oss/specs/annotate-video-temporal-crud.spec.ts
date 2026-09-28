@@ -1,0 +1,231 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ *
+ * Temporal-detection (TD) create/edit/delete on the video surface: the "New TD"
+ * action mints a TD at the playhead whose class assigns and persists, and
+ * deleting the middle of three TDs leaves the siblings' `_id`s and labels
+ * intact across a fresh browser context (the list diff is id-aligned).
+ * Re-seeded per test with the demo events approach [1,6] / pass [7,13] /
+ * depart [14,20].
+ */
+import { expect, test as base } from "src/oss/fixtures";
+import { ModalPom } from "src/oss/poms/modal";
+import { getUniqueDatasetNameWithPrefix } from "src/oss/utils";
+import { EventUtils } from "src/shared/event-utils";
+import type { AbstractFiftyoneLoader } from "src/shared/abstract-loader";
+import type { Page } from "src/oss/fixtures";
+
+const datasetName = getUniqueDatasetNameWithPrefix("annotate-video-td-crud");
+const id = "000000000000000000000000";
+
+const test = base.extend<{ modal: ModalPom }>({
+  modal: async ({ page, eventUtils }, use) => {
+    await use(new ModalPom(page, eventUtils));
+  },
+});
+
+/**
+ * Engine-purity guard: deleting a TD must not write back to the engine from a
+ * `lighter:overlay-removed` subscriber (the DispatchGuard throws "setActive was
+ * called from within a subscriber"). Collect such violations to assert none.
+ */
+const collectEngineErrors = (page: Page): string[] => {
+  const out: string[] = [];
+  const keep = (t: string) => {
+    if (/within a subscriber|setActive|DispatchGuard/.test(t)) out.push(t);
+  };
+  page.on("pageerror", (e) => keep(e.message));
+  page.on("console", (m) => {
+    if (m.type() === "error") keep(m.text());
+  });
+  return out;
+};
+
+test.beforeAll(async ({ foWebServer }) => {
+  await foWebServer.startWebServer();
+});
+
+test.afterAll(async ({ foWebServer }) => {
+  await foWebServer.stopWebServer();
+});
+
+test.beforeEach(async ({ datasetFactory }) => {
+  // three TDs: approach [1,6], pass [7,13], depart [14,20].
+  await datasetFactory.createDataset({
+    mediaType: "video",
+    datasetName,
+    sampleFrames: true,
+    schema: {
+      "frames.detections": "Detections",
+      "frames.detections.detections.instance": "Instance",
+      "frames.detections.detections.keyframe": "BooleanField",
+      "frames.detections.detections.propagation": "DictField",
+      events: "TemporalDetections",
+    },
+    labelSchemas: {
+      "frames.detections": {
+        type: "detections",
+        component: "dropdown",
+        classes: ["vehicle", "person", "road sign"],
+        attributes: [
+          { name: "id", type: "id", component: "text", read_only: true },
+          { name: "tags", type: "list<str>", component: "text" },
+          { name: "confidence", type: "float", component: "text" },
+          { name: "index", type: "int", component: "text" },
+          { name: "mask_path", type: "str", component: "text" },
+        ],
+      },
+      events: {
+        type: "temporaldetections",
+        component: "dropdown",
+        classes: ["approach", "pass", "depart"],
+        attributes: [
+          { name: "id", type: "id", component: "text", read_only: true },
+        ],
+      },
+    },
+    // three events split the clip into thirds
+    withSampleData: ({ numFrames }, { label }) => {
+      const a = Math.max(1, Math.floor(numFrames / 3));
+      const b = Math.max(a + 1, Math.floor((2 * numFrames) / 3));
+      return {
+        events: label.temporalDetections([
+          label.temporalDetection({ label: "approach", support: [1, a] }),
+          label.temporalDetection({ label: "pass", support: [a + 1, b] }),
+          label.temporalDetection({
+            label: "depart",
+            support: [b + 1, numFrames],
+          }),
+        ]),
+      };
+    },
+    // present-but-empty on every frame, so the first draw's patch can append
+    withFrameData: (_, { label }) => ({ detections: label.detections([]) }),
+  });
+});
+
+const openAnnotate = async (
+  fiftyoneLoader: AbstractFiftyoneLoader,
+  modal: ModalPom,
+  page: Page,
+) => {
+  await fiftyoneLoader.waitUntilGridVisible(page, datasetName, {
+    searchParams: new URLSearchParams({ id }),
+  });
+  await modal.assert.isOpen();
+  await modal.sidebar.switchMode("annotate");
+  await modal.videoAnnotate.waitForSurface();
+};
+
+const savedResponse = (page: Page) =>
+  page.waitForResponse(
+    (r) =>
+      /\/sample\//.test(r.url()) &&
+      ["POST", "PATCH", "PUT", "DELETE"].includes(r.request().method()),
+  );
+
+const stepForward = async (modal: ModalPom, n: number) => {
+  for (let i = 0; i < n; i++) {
+    await modal.videoAnnotate.stepForward();
+  }
+};
+
+test.describe.serial("video annotation temporal detection CRUD", () => {
+  test("New TD creates a temporal detection, a class edit persists", async ({
+    browser,
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.assert.temporalTrackCount(3);
+    const before = new Set(await va.temporalTrackIds());
+
+    // mint a TD at the playhead (frame 1 -> support [1, 11])
+    await va.createTemporalDetection();
+    await va.assert.temporalTrackCount(4);
+
+    // find the new TD row and open its editor from the timeline
+    const newTrack = (await va.temporalTrackIds()).find((t) => !before.has(t));
+    expect(newTrack).toBeTruthy();
+
+    // the tracks drawer starts closed; pin the new TD row so the timeline click
+    // has a visible target
+    await va.pinTrack(newTrack as string);
+
+    const saved = savedResponse(page);
+    await va.clickTrack(newTrack as string);
+    await expect(modal.sidebar.edit.backButton).toBeVisible();
+    await modal.sidebar.edit.selectFieldChoice("label", "depart");
+    await modal.sidebar.edit.assert.verifyFieldValue("label", "depart");
+    await saved;
+
+    // the create + class survive a true round-trip
+    const context = await browser.newContext();
+    const freshPage = await context.newPage();
+    try {
+      const m2 = new ModalPom(freshPage, new EventUtils(freshPage));
+      await openAnnotate(fiftyoneLoader, m2, freshPage);
+      await m2.videoAnnotate.assert.temporalTrackCount(4);
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("deleting the middle TD preserves the siblings' ids and labels", async ({
+    browser,
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    const engineErrors = collectEngineErrors(page);
+    await openAnnotate(fiftyoneLoader, modal, page);
+    const va = modal.videoAnnotate;
+
+    await va.assert.temporalTrackCount(3);
+    const beforeIds = await va.temporalTrackIds();
+
+    // step into the "pass" third [7,13] and target the middle TD
+    await stepForward(modal, 7);
+    await va.assert.labelListed("pass");
+    const deletedId = await va.labelRowId("pass");
+    const expectedIds = beforeIds.filter((t) => !t.endsWith(deletedId)).sort();
+    expect(expectedIds).toHaveLength(2);
+
+    // delete it through the editor (engine delete -> id-aligned list diff)
+    const saved = savedResponse(page);
+    await va.selectLabel("pass");
+    await expect(modal.sidebar.edit.backButton).toBeVisible();
+    await modal.sidebar.edit.deleteLabel();
+    await saved;
+
+    await va.assert.temporalTrackCount(2);
+    expect((await va.temporalTrackIds()).sort()).toEqual(expectedIds);
+
+    // deleting the open-in-editor TD must not write to the engine from the
+    // `overlay-removed` subscriber (engine-purity DispatchGuard)
+    expect(engineErrors).toEqual([]);
+
+    // the round-trip is the real guard: the surviving two keep IDENTICAL ids
+    // (a mid-list delete must not rewrite a sibling's _id) and their labels.
+    const context = await browser.newContext();
+    const freshPage = await context.newPage();
+    try {
+      const m2 = new ModalPom(freshPage, new EventUtils(freshPage));
+      const va2 = m2.videoAnnotate;
+      await openAnnotate(fiftyoneLoader, m2, freshPage);
+      await va2.assert.temporalTrackCount(2);
+      expect((await va2.temporalTrackIds()).sort()).toEqual(expectedIds);
+
+      // labels intact: approach at frame 1, depart in its third; no "pass"
+      await va2.assert.labelListed("approach");
+      await stepForward(m2, 13);
+      await va2.assert.labelListed("depart");
+      await va2.assert.labelListed("pass", false);
+    } finally {
+      await context.close();
+    }
+  });
+});

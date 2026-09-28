@@ -10,7 +10,7 @@ import { addWarning, type TranslationContext } from "./utils";
  */
 export function translateToUISchema(
   schemaIO: any,
-  context: TranslationContext
+  context: TranslationContext,
 ): UiSchema {
   const uiSchema: UiSchema = {};
   const view = schemaIO.view;
@@ -58,9 +58,21 @@ export function translateToUISchema(
       };
       break;
 
+    case SmartFormComponents.TaxonomyView:
+      uiSchema["ui:widget"] = "TaxonomyWidget";
+      uiSchema["ui:options"] = {
+        taxonomy: view.taxonomy,
+        multiSelect: view.multiSelect,
+      };
+      break;
+
     case SmartFormComponents.RadioView:
     case SmartFormComponents.RadioGroup:
       uiSchema["ui:widget"] = "radio";
+      break;
+
+    case SmartFormComponents.CheckboxesView:
+      uiSchema["ui:widget"] = "checkboxes";
       break;
 
     case SmartFormComponents.AutocompleteView:
@@ -91,6 +103,9 @@ export function translateToUISchema(
 
     case SmartFormComponents.JsonEditorView:
       uiSchema["ui:widget"] = "JsonEditorWidget";
+      if (view.height != null) {
+        uiSchema["ui:options"] = { height: view.height };
+      }
       break;
 
     case SmartFormComponents.ColorView:
@@ -106,8 +121,8 @@ export function translateToUISchema(
       addWarning(
         context,
         `${component} mapped to textarea at: ${context.path.join(
-          "."
-        )}. Consider custom widget for syntax highlighting.`
+          ".",
+        )}. Consider custom widget for syntax highlighting.`,
       );
       break;
 
@@ -116,8 +131,8 @@ export function translateToUISchema(
       addWarning(
         context,
         `FileView may require custom widget configuration at: ${context.path.join(
-          "."
-        )}`
+          ".",
+        )}`,
       );
       break;
 
@@ -128,7 +143,7 @@ export function translateToUISchema(
       }
       addWarning(
         context,
-        `TabsView mapped to radio buttons at: ${context.path.join(".")}`
+        `TabsView mapped to radio buttons at: ${context.path.join(".")}`,
       );
       break;
 
@@ -186,7 +201,7 @@ export function translateToUISchema(
           translateToUISchema(item, {
             ...context,
             path: [...context.path, `items[${index}]`],
-          })
+          }),
         );
       }
       break;
@@ -199,7 +214,7 @@ export function translateToUISchema(
       };
       addWarning(
         context,
-        `MapView requires custom implementation at: ${context.path.join(".")}`
+        `MapView requires custom implementation at: ${context.path.join(".")}`,
       );
       break;
 
@@ -225,8 +240,8 @@ export function translateToUISchema(
       addWarning(
         context,
         `Custom component "${component}" requires custom widget implementation at: ${context.path.join(
-          "."
-        )}`
+          ".",
+        )}`,
       );
       break;
   }

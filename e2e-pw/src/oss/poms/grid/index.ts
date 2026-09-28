@@ -1,10 +1,18 @@
 import { Locator, Page, expect } from "src/oss/fixtures";
 import { Duration } from "src/oss/utils";
-import { EventUtils } from "src/shared/event-utils";
+import { ArmedEvent, EventUtils } from "src/shared/event-utils";
 import { GridActionsRowPom } from "../action-row/grid-actions-row";
 import { GridSliceSelectorPom } from "../action-row/grid-slice-selector";
 import { GridTaggerPom } from "../action-row/tagger/grid-tagger";
 import { UrlPom } from "../url";
+
+/**
+ * A grid tile is either a looker or a custom renderer (e.g. multimodal).
+ * Sample-level operations address tiles; looker-specific accessors exist only
+ * for looker internals (canvas screenshots, looker checkbox markup).
+ */
+const TILE_SELECTOR = "[data-cy=looker], [data-cy=grid-custom-renderer]";
+const CUSTOM_RENDERER_TEST_ID = "grid-custom-renderer";
 
 export class GridPom {
   readonly assert: GridAsserter;
@@ -17,7 +25,7 @@ export class GridPom {
 
   constructor(
     public readonly page: Page,
-    private readonly eventUtils: EventUtils
+    private readonly eventUtils: EventUtils,
   ) {
     this.assert = new GridAsserter(this);
     this.url = new UrlPom(page, eventUtils);
@@ -36,8 +44,16 @@ export class GridPom {
     return this.locator.getByTestId("spotlight-section-forward");
   }
 
+  getNthTile(n: number) {
+    return this.locator.locator(TILE_SELECTOR).nth(n);
+  }
+
   getNthLooker(n: number) {
     return this.locator.getByTestId("looker").nth(n);
+  }
+
+  private async isCustomRendererTile(tile: Locator) {
+    return (await tile.getAttribute("data-cy")) === CUSTOM_RENDERER_TEST_ID;
   }
 
   async getNthCheckbox(n: number) {
@@ -45,19 +61,87 @@ export class GridPom {
   }
 
   async toggleSelectNthSample(n: number) {
-    await this.getNthLooker(n).click({ position: { x: 10, y: 5 } });
+    const tile = this.getNthTile(n);
+    if (await this.isCustomRendererTile(tile)) {
+      // the selection checkbox is revealed in the tile's top selection region
+      await tile.hover({ position: { x: 10, y: 5 } });
+      const checkbox = tile.locator("[data-fo-selection-checkbox]");
+      await expect(checkbox).toBeVisible();
+      await checkbox.click();
+      return;
+    }
+    await tile.click({ position: { x: 10, y: 5 } });
   }
 
   async toggleSelectFirstSample() {
     await this.toggleSelectNthSample(0);
   }
 
+  async addNthSampleToBucket(n: number, bucketName: string) {
+    const tile = this.getNthTile(n);
+    const box = await tile.boundingBox();
+    if (!box) throw new Error(`grid tile ${n} has no bounds`);
+    // Bucket chips appear when hovering near the tile's top edge.
+    await tile.hover({
+      position: { x: box.width / 2, y: Math.min(20, box.height / 8) },
+    });
+    const button = this.page.getByRole("button", {
+      name: `Add to ${bucketName}`,
+    });
+    await expect(button).toBeVisible();
+    await button.click();
+  }
+
   async openNthSample(n: number) {
-    await this.getNthLooker(n).click({ position: { x: 10, y: 80 } });
+    const tile = this.getNthTile(n);
+    if (await this.isCustomRendererTile(tile)) {
+      // Hover reveals whatever affordances the tile only shows on hover.
+      await tile.hover();
+      // Only a renderer whose own surface consumes the click offers an explicit
+      // open button — a point-cloud preview orbits its camera on drag, so it
+      // suppresses grid activation and needs one. Every other custom-rendered
+      // tile opens by being clicked, the same as an ordinary looker.
+      const openButton = tile.getByRole("button", {
+        name: "Open sample modal",
+      });
+      if ((await openButton.count()) > 0) {
+        await openButton.click();
+        return;
+      }
+    }
+    await tile.click({ position: { x: 10, y: 80 } });
   }
 
   async openFirstSample() {
     return this.openNthSample(0);
+  }
+
+  /**
+   * Temporal-tag marks drawn on the tiles' interval lanes. One per interval on
+   * a tagged sample; tiles whose sample carries no tag draw no lane at all.
+   */
+  temporalTagMarks(): Locator {
+    return this.page.locator(
+      '[data-testid="episode-grid-overlay"] [data-source="fiftyone:temporal-tags"]',
+    );
+  }
+
+  async temporalTagMarkCount(): Promise<number> {
+    return this.temporalTagMarks().count();
+  }
+
+  /**
+   * The first mark's position on its lane, as the percentages the lane lays it
+   * out with — the tag's own time over the lane's time axis.
+   */
+  async temporalTagMarkGeometry(): Promise<{ left: number; width: number }> {
+    const mark = this.temporalTagMarks().first();
+    const [left, width] = await Promise.all([
+      mark.evaluate((el) => Number.parseFloat((el as HTMLElement).style.left)),
+      mark.evaluate((el) => Number.parseFloat((el as HTMLElement).style.width)),
+    ]);
+
+    return { left, width };
   }
 
   async getEntryCountText() {
@@ -81,30 +165,57 @@ export class GridPom {
   }
 
   async selectSlice(slice: string) {
+    if (await this.page.getByTestId("modal").isVisible()) {
+      // Defensive, no-op-ish cleanup to dismiss any open thing before interacting with the grid slice selector.
+      await this.page.click("body", { position: { x: 0, y: 0 } });
+    }
+
     await this.sliceSelector.selectSlice(slice);
   }
 
   /**
-   * @deprecated Use `getWaitForGridRefreshPromise` instead.
+   * @deprecated Use `armGridRefresh` instead.
    */
   async waitForGridToLoad() {
-    return this.page.waitForSelector("[data-cy=looker]", {
+    return this.page.waitForSelector(TILE_SELECTOR, {
       timeout: 2000,
     });
   }
 
-  async getWaitForGridRefreshPromise() {
-    const refreshStartPromise =
-      this.eventUtils.getEventReceivedPromiseForPredicate("grid-unmount");
-    const refreshEndPromise =
-      this.eventUtils.getEventReceivedPromiseForPredicate("grid-mount");
-    return Promise.all([refreshStartPromise, refreshEndPromise]);
+  /**
+   * Install counters for grid lifecycle events at document start — arm
+   * BEFORE navigating to the page. Counting from document start makes the
+   * baseline exact: initial page load contributes one mount and no unmount,
+   * and each grid refresh thereafter contributes one unmount and one mount.
+   * Arming after load instead would race the initial mount event, which
+   * dispatches from an effect and can land after the tiles are visible.
+   */
+  async armLifecycleCounters() {
+    return {
+      mounts: await this.eventUtils.initCounter("grid-mount"),
+      unmounts: await this.eventUtils.initCounter("grid-unmount"),
+    };
+  }
+
+  /**
+   * Arm listeners for a full grid refresh (unmount then remount). Await the
+   * arming BEFORE the action that refreshes the grid, then await the handle's
+   * `received` after it.
+   */
+  async armGridRefresh(): Promise<ArmedEvent> {
+    const unmount = await this.eventUtils.arm("grid-unmount");
+    const mount = await this.eventUtils.arm("grid-mount");
+    return new ArmedEvent(
+      Promise.all([unmount.received, mount.received]).then(
+        (): void => undefined,
+      ),
+    );
   }
 
   async run<T>(wrap: () => Promise<T>): Promise<T> {
-    const promise = this.getWaitForGridRefreshPromise();
+    const refresh = await this.armGridRefresh();
     const result = await wrap();
-    await promise;
+    await refresh.received;
     return result;
   }
 }
@@ -112,11 +223,8 @@ export class GridPom {
 class GridAsserter {
   constructor(private readonly gridPom: GridPom) {}
 
-  async isLookerCountEqualTo(n: number) {
-    const lookersCount = await this.gridPom.locator
-      .getByTestId("looker")
-      .count();
-    expect(lookersCount).toBe(n);
+  async isTileCountEqualTo(n: number) {
+    await expect(this.gridPom.locator.locator(TILE_SELECTOR)).toHaveCount(n);
   }
 
   async isNthSampleSelected(n: number) {
@@ -127,37 +235,42 @@ class GridAsserter {
   async nthSampleHasTagValue(
     n: number,
     tagName: string,
-    expectedTagValue: string
+    expectedTagValue: string,
   ) {
-    const tagElement = this.gridPom
-      .getNthLooker(n)
-      .getByTestId(`tag-${tagName}`);
+    const tagElement = this.gridPom.getNthTile(n).getByTestId(`tag-${tagName}`);
     await expect(tagElement).toHaveText(expectedTagValue);
   }
 
+  async nthSampleHasNoTag(n: number, tagName: string) {
+    const tagElement = this.gridPom.getNthTile(n).getByTestId(`tag-${tagName}`);
+    await expect(tagElement).toBeHidden();
+  }
+
   async isSelectionCountEqualTo(n: number) {
-    const action = this.gridPom.actionsRow.gridActionsRow.getByTestId(
-      "action-manage-selected"
-    );
+    const tray = this.gridPom.page.getByRole("region", { name: "Selection" });
 
     if (n === 0) {
-      await expect(action).toBeHidden();
+      await expect(tray).toContainText("Act on all samples in the grid");
       return;
     }
 
-    await expect(action.first()).toHaveText(String(n));
+    await expect(tray).toContainText(
+      new RegExp(
+        `${n.toLocaleString()}\\s*sample${n === 1 ? "" : "s"} selected`,
+      ),
+    );
   }
 
   async isEntryCountTextEqualTo(text: string) {
-    return this.gridPom.page.waitForFunction(
-      (text_) => {
-        return (
-          document.querySelector("[data-cy='entry-counts']").textContent ===
-          text_
-        );
-      },
-      text,
-      { timeout: 2000 }
-    );
+    const entryCounts = this.gridPom.page.getByTestId("entry-counts");
+    const normalize = (value: string | null) =>
+      (value ?? "").replace(/\s+/g, " ").trim();
+
+    await expect(entryCounts).toBeVisible({ timeout: Duration.Seconds(20) });
+    await expect
+      .poll(async () => normalize(await entryCounts.textContent()), {
+        timeout: Duration.Seconds(20),
+      })
+      .toBe(normalize(text));
   }
 }

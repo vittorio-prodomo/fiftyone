@@ -1,28 +1,45 @@
-import { LoadingSpinner } from "@fiftyone/components";
-import { EntryKind } from "@fiftyone/state";
-import { Typography } from "@mui/material";
-import { atom, useAtomValue } from "jotai";
+import { useRegisterAIAnnotationEventHandlers } from "@fiftyone/annotation/src/agents/hooks/useRegisterAIAnnotationEventHandlers";
+import { KnownContexts, useUndoRedo } from "@fiftyone/commands";
+import { EnterpriseUpsellCallout, LoadingSpinner } from "@fiftyone/components";
+import {
+  useBrowserStorage,
+  useCurrentSampleId,
+  useIsGroupDataset,
+  useIsVideo,
+} from "@fiftyone/state";
+import { Text, TextColor, TextVariant } from "@voxel51/voodo";
+import { useAtomValue } from "jotai";
 import React, { useEffect } from "react";
 import styled from "styled-components";
-import Sidebar from "../../../Sidebar";
 import Actions from "./Actions";
-import Edit, { isEditing } from "./Edit";
-import GroupEntry from "./GroupEntry";
-import ImportSchema from "./ImportSchema";
-import LabelEntry from "./LabelEntry";
-import LoadingEntry from "./LoadingEntry";
-import PrimitiveEntry from "./PrimitiveEntry";
-import SchemaManager from "./SchemaManager";
-import { activeLabelSchemas, labelSchemasData, showModal } from "./state";
-import type { AnnotationDisabledReason } from "./useCanAnnotate";
-import useEntries from "./useEntries";
-import useLabels from "./useLabels";
-import { usePrimitivesCount } from "./usePrimitivesCount";
-import { useAnnotationContextManager } from "./useAnnotationContextManager";
+import AIAnnotationPanel from "./AIAnnotationPanel";
+import Edit from "./Edit";
 import useDelete from "./Edit/useDelete";
-import { KnownContexts, useUndoRedo } from "@fiftyone/commands";
+import { useAnnotationContext } from "./Edit/useAnnotationContext";
+import GroupAnnotation from "./GroupAnnotation";
+import ImportSchema, { useShowImportSchema } from "./ImportSchema";
+import LabelList from "./LabelList";
+import { labelSchemasData } from "./state";
+import { useAnnotationContextManager } from "./useAnnotationContextManager";
+import { useEngineUndoableBridge } from "./useEngineUndoableBridge";
+import { useFormAnchor } from "./useFormAnchor";
+import type { AnnotationDisabledReason } from "./useCanAnnotate";
+import useLabels from "./useLabels";
+import { useRegisterPolylineSidebarSyncHandlers } from "./Edit/useRegisterPolylineSidebarSyncHandlers";
+import useSourceFieldToActivate from "./useSourceFieldToActivate";
+import {
+  useSaveSettlement,
+  useSync3dModalSample,
+  useSyncAnnotationEngine,
+  useSyncModalSample,
+} from "@fiftyone/annotation";
+import { useLighterAnnotationBridge } from "./useLighterAnnotationBridge";
+import { useLooker3dAnnotationBridge } from "./useLooker3dAnnotationBridge";
+import { useSyncAnnotationSliceMediaType } from "./useSyncAnnotationSliceMediaType";
+import { Box } from "@mui/material";
 
-const showImportPage = atom((get) => !get(activeLabelSchemas)?.length);
+/** Persists (per browser) the user's dismissal of the video-AI upsell. */
+const AI_UPSELL_DISMISSED_KEY = "fo-annotate-video-ai-upsell-dismissed";
 
 const DISABLED_MESSAGES: Record<
   Exclude<AnnotationDisabledReason, null>,
@@ -30,17 +47,26 @@ const DISABLED_MESSAGES: Record<
 > = {
   generatedView: (
     <p>
-      Annotation isn&rsquo;t supported for patches, frames, clips, or
-      materialized views.
+      Annotation isn&rsquo;t supported for frames, clips, or materialized views.
     </p>
   ),
-  groupedDatasetNoSupportedSlices: (
+  groupDatasetNoSupportedSlices: (
     <p>
-      This grouped dataset has no slices that support annotation. Only image and
+      This group dataset has no slices that support annotation. Only image and
       3D slices can be annotated.
     </p>
   ),
   videoDataset: <p>Annotation isn&rsquo;t supported for video datasets.</p>,
+  dynamicGroupNotQueryPerformant: (
+    <p>
+      Annotating dynamic groups requires a query performant view. Group by a
+      field with <code>order_by</code> and <code>order_by_key</code> set, and
+      create a compound unique index on the group and order fields.
+    </p>
+  ),
+  multimodalDataset: (
+    <p>Annotation isn&rsquo;t supported for multimodal datasets.</p>
+  ),
 };
 
 const Container = styled.div`
@@ -56,71 +82,115 @@ const Loading = () => {
   return (
     <Container>
       <LoadingSpinner />
-      <Typography color="secondary" padding="1rem 0">
+      <Text
+        color={TextColor.Secondary}
+        variant={TextVariant.Md}
+        style={{ padding: "1rem 0" }}
+      >
         Loading
-      </Typography>
+      </Text>
     </Container>
   );
 };
 
-const AnnotateSidebar = () => {
-  usePrimitivesCount();
-  const editing = useAtomValue(isEditing);
+/**
+ * Invisible save-settlement marker: `data-settled` is "true" iff every
+ * annotation edit has been persisted (no pending deltas, no in-flight patch).
+ * Autosave is an interval tick, so an edit's patch may start seconds after its
+ * commit — tests that hand off to a fresh load (or another test) await this
+ * seam instead of racing the tick.
+ */
+const SaveSettlementMarker = () => {
+  const settled = useSaveSettlement();
 
-  if (editing) return null;
+  return (
+    <div
+      data-cy="annotation-save-state"
+      data-settled={settled ? "true" : "false"}
+      style={{ display: "none" }}
+    />
+  );
+};
+
+const useDisabledMessage = (disabledReason: AnnotationDisabledReason) => {
+  return disabledReason !== null
+    ? DISABLED_MESSAGES[disabledReason]
+    : undefined;
+};
+
+const AnnotationBody = ({
+  disabledReason,
+  loadSchemas,
+}: {
+  disabledReason: AnnotationDisabledReason;
+  loadSchemas: () => void;
+}) => {
+  const isEditingValue = useAnnotationContext().isEditing;
+  const requiredField = useSourceFieldToActivate();
+  const isGroupDataset = useIsGroupDataset();
+  const disabledMessage = useDisabledMessage(disabledReason);
+  const showSetup = useShowImportSchema(!!disabledReason, requiredField);
+  const isVideo = useIsVideo();
+  const [upsellDismissed, setUpsellDismissed] = useBrowserStorage<boolean>(
+    AI_UPSELL_DISMISSED_KEY,
+    false,
+  );
 
   return (
     <>
-      <Actions />
-      <Sidebar
-        isDisabled={() => true}
-        render={(key, group, entry) => {
-          if (entry.kind === EntryKind.GROUP) {
-            return { children: <GroupEntry name={entry.name} /> };
-          }
-
-          if (entry.kind === EntryKind.LABEL) {
-            const { kind: _, atom } = entry;
-            return {
-              children: <LabelEntry atom={atom} />,
-              disabled: true,
-            };
-          }
-
-          if (entry.kind === EntryKind.LOADING) {
-            return {
-              children: <LoadingEntry />,
-              disabled: true,
-            };
-          }
-
-          if (entry.kind === EntryKind.PATH) {
-            return {
-              children: <PrimitiveEntry path={entry.path} />,
-              disabled: false,
-            };
-          }
-
-          throw new Error("unexpected");
-        }}
-        useEntries={useEntries}
-        modal={true}
-      />
+      {isGroupDataset && !disabledReason && (
+        <GroupAnnotation onSliceSelected={loadSchemas} />
+      )}
+      {!showSetup && !disabledReason && isVideo && !upsellDismissed && (
+        <Box sx={{ m: 2 }}>
+          <EnterpriseUpsellCallout
+            data-cy="annotate-video-ai-upsell"
+            title="More powerful AI in Enterprise"
+            description="Annotate with built-in AI – segment, detect, and track objects right now. Upgrade to FiftyOne Enterprise to switch to more powerful models and unlock the full AI toolset across every annotation type."
+            onDismiss={() => setUpsellDismissed(true)}
+          />
+        </Box>
+      )}
+      {!showSetup && <Actions key="actions" hidden={isEditingValue} />}
+      {!showSetup && <AIAnnotationPanel key="ai-panel" />}
+      {isEditingValue && <Edit key="edit" />}
+      {showSetup ? (
+        <ImportSchema
+          key="import"
+          disabled={!!disabledReason}
+          disabledMsg={disabledMessage}
+          requiredField={requiredField}
+        />
+      ) : (
+        <LabelList key="annotate" />
+      )}
     </>
   );
 };
 
 interface AnnotateProps {
   disabledReason: AnnotationDisabledReason;
+  loadSchemas: () => void;
 }
 
-const Annotate = ({ disabledReason }: AnnotateProps) => {
-  const showSchemaModal = useAtomValue(showModal);
-  const showImport = useAtomValue(showImportPage);
+const Annotate = ({ disabledReason, loadSchemas }: AnnotateProps) => {
+  useSyncModalSample();
+  useSync3dModalSample();
+  useSyncAnnotationEngine();
+  useSyncAnnotationSliceMediaType();
+  useEngineUndoableBridge();
+  useLighterAnnotationBridge();
+  useLooker3dAnnotationBridge();
+  useFormAnchor();
+  useRegisterAIAnnotationEventHandlers();
+  useRegisterPolylineSidebarSyncHandlers();
+
   const loading = useAtomValue(labelSchemasData) === null;
-  const editing = useAtomValue(isEditing);
   const contextManager = useAnnotationContextManager();
   const { clear: clearUndo } = useUndoRedo(KnownContexts.ModalAnnotate);
+  const currentSampleId = useCurrentSampleId();
+
+  const isDisabled = disabledReason !== null;
 
   useLabels();
   useDelete();
@@ -134,9 +204,11 @@ const Annotate = ({ disabledReason }: AnnotateProps) => {
     };
   }, []);
 
-  const isDisabled = disabledReason !== null;
-  const disabledMsg =
-    disabledReason !== null ? DISABLED_MESSAGES[disabledReason] : undefined;
+  // Clear undo history on sample change; its commands pin the prior sample's
+  // overlays (and paint snapshots) for redo.
+  useEffect(() => {
+    clearUndo();
+  }, [currentSampleId, clearUndo]);
 
   if (!isDisabled && loading) {
     return <Loading />;
@@ -144,17 +216,12 @@ const Annotate = ({ disabledReason }: AnnotateProps) => {
 
   return (
     <>
-      {editing && <Edit key="edit" />}
-      {showImport || isDisabled ? (
-        <ImportSchema
-          key="import"
-          disabled={isDisabled}
-          disabledMsg={disabledMsg}
-        />
-      ) : (
-        <AnnotateSidebar key="annotate" />
-      )}
-      {showSchemaModal && <SchemaManager key="manage" />}
+      <SaveSettlementMarker key="save-state" />
+      <AnnotationBody
+        disabledReason={disabledReason}
+        key="body"
+        loadSchemas={loadSchemas}
+      />
     </>
   );
 };

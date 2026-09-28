@@ -19,8 +19,10 @@ import {
 import { useCallback, useState } from "react";
 import { TAB_GUI, TAB_IDS, TAB_JSON, TabId } from "../constants";
 import Footer from "../Footer";
-import { useIsLargeDataset, useToggleFieldVisibility } from "../hooks";
+import { useIsLargeDataset } from "../hooks";
 import { EditContainer, SchemaSection } from "../styled";
+
+import ApplyOntologySection from "./ApplyOntologySection";
 import Errors from "./Errors";
 import GUIContent from "./GUIContent";
 import Header from "./Header";
@@ -31,8 +33,6 @@ const EditFieldLabelSchema = ({ field }: { field: string }) => {
   const labelSchema = useLabelSchema(field);
   const hasSavedSchema = !!labelSchema.savedLabelSchema;
   const [activeTab, setActiveTab] = useState<TabId>(TAB_GUI);
-  const { isActive: isFieldVisible, toggle: handleToggleVisibility } =
-    useToggleFieldVisibility(field);
   const { isLargeDataset, scanLimit } = useIsLargeDataset();
 
   const handleTabChange = useCallback(
@@ -40,7 +40,7 @@ const EditFieldLabelSchema = ({ field }: { field: string }) => {
       setActiveTab(TAB_IDS[index]);
       labelSchema.resetErrors();
     },
-    [labelSchema.resetErrors]
+    [labelSchema.resetErrors],
   );
 
   return (
@@ -69,6 +69,8 @@ const EditFieldLabelSchema = ({ field }: { field: string }) => {
           values.
         </Text>
       </div>
+
+      <ApplyOntologySection field={field} />
 
       <div
         style={{
@@ -103,6 +105,7 @@ const EditFieldLabelSchema = ({ field }: { field: string }) => {
               data-cy={"scan"}
               size={Size.Md}
               variant={Variant.Secondary}
+              disabled={!!labelSchema.appliedOntology}
               onClick={labelSchema.scan}
             >
               <Icon
@@ -162,8 +165,8 @@ const EditFieldLabelSchema = ({ field }: { field: string }) => {
               <Toggle
                 data-cy={"toggle-visibility"}
                 size={Size.Md}
-                checked={isFieldVisible}
-                onChange={handleToggleVisibility}
+                checked={labelSchema.isFieldVisible}
+                onChange={labelSchema.toggleVisibility}
               />
               <Text variant={TextVariant.Lg}>Visible field</Text>
             </Stack>

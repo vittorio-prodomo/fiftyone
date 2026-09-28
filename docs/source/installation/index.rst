@@ -3,6 +3,10 @@ FiftyOne Installation
 
 .. default-role:: code
 
+.. meta::
+    :description: How to install FiftyOne, set up virtual environments,
+        and troubleshoot common installation issues.
+
 .. note::
 
     Did you know? :ref:`FiftyOne Enterprise <fiftyone-enterprise>` is an open
@@ -15,7 +19,7 @@ Prerequisites
 -------------
 
 You will need a working Python installation. FiftyOne currently requires
-**Python 3.9 - 3.12**.
+**Python 3.10 - 3.13**.
 
 On Linux, we recommend installing Python through your system package manager
 (APT, YUM, etc.) if it is available. On other platforms, Python can be
@@ -41,7 +45,7 @@ This will install FiftyOne and all of its dependencies. Once this has
 completed, you can verify that FiftyOne is installed in your virtual
 environment by importing the `fiftyone` package:
 
-.. code-block:: text
+.. code-block:: console
 
     $ python
     >>>
@@ -221,6 +225,10 @@ a dataset for the first time in a newer version of FiftyOne.
 
 Downgrading FiftyOne
 --------------------
+
+.. customavailablein::
+    :oss_version: 0.7.3
+    :enterprise_version: 1.0
 
 If you need to downgrade to an older version of FiftyOne for any reason, you
 can do so.

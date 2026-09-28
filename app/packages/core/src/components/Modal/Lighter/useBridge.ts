@@ -2,23 +2,23 @@
  * Copyright 2017-2026, Voxel51, Inc.
  */
 
+import { getFieldSchema, useDeleteAnnotation } from "@fiftyone/annotation";
 import {
-  AnnotationEventGroup,
-  useAnnotationEventBus,
-  useAnnotationEventHandler,
-} from "@fiftyone/annotation";
-import {
-  type LighterEventGroup,
   type Scene2D,
   UNDEFINED_LIGHTER_SCENE_ID,
-  UpdateLabelCommand,
-  useLighterEventBus,
   useLighterEventHandler,
 } from "@fiftyone/lighter";
-import { useSetAtom } from "jotai";
+import * as fos from "@fiftyone/state";
 import { useCallback, useEffect } from "react";
-import { currentData } from "../Sidebar/Annotate/Edit/state";
-import { coerceStringBooleans, useLabelsContext } from "../Sidebar/Annotate";
+import { useRecoilValue } from "recoil";
+import { useAnnotationContext } from "../Sidebar/Annotate/Edit/useAnnotationContext";
+import { useDetectionMode } from "../Sidebar/Annotate/Edit/useDetectionMode";
+import {
+  usePolylineMode,
+  usePolylineModeInstaller,
+} from "../Sidebar/Annotate/Edit/usePolylineMode";
+import { useSegmentationMode } from "../Sidebar/Annotate/Edit/useSegmentationMode";
+import { useLabelsContext } from "../Sidebar/Annotate";
 import useColorMappingContext from "./useColorMappingContext";
 import { useLighterTooltipEventHandler } from "./useLighterTooltipEventHandler";
 
@@ -31,127 +31,138 @@ import { useLighterTooltipEventHandler } from "./useLighterTooltipEventHandler";
  */
 export const useBridge = (scene: Scene2D | null) => {
   useLighterTooltipEventHandler(scene);
-  const annotationEventBus = useAnnotationEventBus();
-  const eventBus = useLighterEventBus(
-    scene?.getEventChannel() ?? UNDEFINED_LIGHTER_SCENE_ID
-  );
+  const deleteAnnotation = useDeleteAnnotation();
   const useEventHandler = useLighterEventHandler(
-    scene?.getEventChannel() ?? UNDEFINED_LIGHTER_SCENE_ID
+    scene?.getEventChannel() ?? UNDEFINED_LIGHTER_SCENE_ID,
   );
-  const save = useSetAtom(currentData);
-  const { updateLabelData } = useLabelsContext();
-
-  useAnnotationEventHandler(
-    "annotation:sidebarValueUpdated",
-    useCallback(
-      (payload) => {
-        if (!scene) {
-          return;
-        }
-
-        const overlay = scene.getOverlay(payload.overlayId);
-
-        if (!overlay) {
-          return;
-        }
-
-        scene.executeCommand(
-          new UpdateLabelCommand(
-            overlay,
-            payload.currentLabel,
-            payload.value,
-            annotationEventBus
-          )
-        );
-      },
-      [annotationEventBus, scene]
-    )
+  const { clear, readEditing, setEditingMask } = useAnnotationContext();
+  const { getLabelById } = useLabelsContext();
+  const fieldSchema = useRecoilValue(
+    fos.fieldSchema({ space: fos.State.SPACE.SAMPLE }),
   );
 
-  useAnnotationEventHandler(
-    "annotation:sidebarLabelHover",
+  const segmentationMode = useSegmentationMode();
+  const detectionMode = useDetectionMode();
+  const polylineMode = usePolylineMode();
+
+  usePolylineModeInstaller();
+
+  useEventHandler(
+    "lighter:overlay-removed",
     useCallback(
       (payload) => {
-        if (!scene) {
-          return;
+        // Read at event-handling time to avoid stale closure
+        const currentLabel = readEditing().selected?.label;
+
+        // If the removed overlay is the one being edited, close the sidebar
+        if (currentLabel?.overlay?.id === payload.id) {
+          clear();
         }
-
-        eventBus.dispatch("lighter:do-overlay-hover", {
-          id: payload.id,
-          tooltip: payload.tooltip ?? false,
-        });
       },
-      [scene, eventBus]
-    )
-  );
-
-  useAnnotationEventHandler(
-    "annotation:sidebarLabelUnhover",
-    useCallback(
-      (payload) => {
-        if (!scene) {
-          return;
-        }
-
-        eventBus.dispatch("lighter:do-overlay-unhover", {
-          id: payload.id,
-        });
-      },
-      [scene, eventBus]
-    )
+      [readEditing, clear],
+    ),
   );
 
   useEventHandler(
-    "lighter:overlay-establish",
+    "lighter:overlay-undone",
     useCallback(
       (payload) => {
-        annotationEventBus.dispatch(
-          "annotation:canvasDetectionOverlayEstablish",
-          {
-            id: payload.id,
-            overlay: payload.overlay.overlay,
-          }
-        );
+        // Look up the label before it gets removed from the sidebar
+        // (lighter:overlay-undone fires before lighter:overlay-removed)
+        const label = getLabelById(payload.id);
+        if (!label) {
+          return;
+        }
+
+        const schema = getFieldSchema(fieldSchema, label.path);
+        if (!schema) {
+          return;
+        }
+
+        deleteAnnotation(label).catch((error) => {
+          console.error("Failed to persist undo of creation:", error);
+        });
       },
-      [annotationEventBus]
-    )
+      [deleteAnnotation, fieldSchema, getLabelById],
+    ),
   );
 
-  const handleUndoRedo = useCallback(
-    (
-      payload:
-        | AnnotationEventGroup["annotation:labelEdit"]
-        | AnnotationEventGroup["annotation:undoLabelEdit"]
-    ) => {
-      // sync data with the sidebar
-      if (payload.label) {
-        updateLabelData(payload.label._id ?? payload.label.id, payload.label);
+  // Mode bookkeeping when an overlay's label is mutated outside the command
+  // stack (e.g. AI inference applying a new mask). Form/list data sync is
+  // the engine's: the wiring hook commits the overlay change, the read-half
+  // re-derives rows, and the form follows the anchor — no save-backs.
+  useEventHandler(
+    "lighter:overlay-commit-requested",
+    useCallback(
+      (payload) => {
+        setEditingMask(payload.id, payload.hasMask);
+      },
+      [setEditingMask],
+    ),
+  );
+
+  useEventHandler(
+    "lighter:overlay-create",
+    useCallback(() => {
+      if (segmentationMode.segmentationModeActive) {
+        segmentationMode.create();
+      } else if (detectionMode.detectionModeActive) {
+        detectionMode.create();
       }
-    },
-    [updateLabelData]
+    }, [detectionMode, segmentationMode]),
   );
 
-  useAnnotationEventHandler("annotation:labelEdit", handleUndoRedo);
-  useAnnotationEventHandler("annotation:undoLabelEdit", handleUndoRedo);
+  useEventHandler(
+    "lighter:segmentation-mode-quit",
+    useCallback(() => {
+      if (segmentationMode.segmentationModeActive) {
+        segmentationMode.deactivateSegmentationMode();
+      }
+    }, [segmentationMode]),
+  );
 
-  const handleCommandEvent = useCallback(
-    (payload: LighterEventGroup["lighter:command-executed"]) => {
-      if (!payload.command.nextLabel) {
+  useEventHandler(
+    "lighter:detection-mode-quit",
+    useCallback(() => {
+      detectionMode.deactivateDetectionMode();
+    }, [detectionMode]),
+  );
+
+  // Generic "quit the active mode" request from global gestures (e.g.
+  // right-click on empty canvas). Each mode self-filters on its own active
+  // state so InteractionManager doesn't need to know about modes.
+  useEventHandler(
+    "lighter:active-mode-quit-requested",
+    useCallback(() => {
+      if (detectionMode.detectionModeActive) {
+        detectionMode.deactivateDetectionMode();
         return;
       }
 
-      const newLabel = coerceStringBooleans(
-        payload.command.nextLabel as Record<string, unknown>
-      );
-
-      if (newLabel) {
-        save(newLabel);
+      if (segmentationMode.segmentationModeActive) {
+        segmentationMode.deactivateSegmentationMode();
+        return;
       }
-    },
-    [save]
+
+      if (polylineMode.polylineModeActive) {
+        polylineMode.deactivatePolylineMode();
+        return;
+      }
+    }, [detectionMode, polylineMode, segmentationMode]),
   );
 
-  useEventHandler("lighter:command-executed", handleCommandEvent);
+  useEventHandler(
+    "lighter:point-selection-finalize",
+    useCallback(() => {
+      if (segmentationMode.segmentationModeActive) {
+        // Commit the in-progress mask and re-arm a fresh point session. The
+        // committed label stays selected (a second right-click deselects it);
+        // `finalizePointSelection` flags the next click to seed a NEW mask so
+        // it doesn't refine the one just committed.
+        segmentationMode.finalizePointSelection();
+      }
+    }, [segmentationMode]),
+  );
 
   const context = useColorMappingContext();
 

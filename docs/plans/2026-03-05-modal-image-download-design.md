@@ -24,9 +24,9 @@ GET /media/download?filepath={encoded_path}
 Reuses the same file-serving logic as `/media` (stat check, MIME type guessing,
 streaming in 8192-byte chunks) but adds:
 
--   `Content-Disposition: attachment; filename="<basename>"` header to force
-    download
--   Filename extracted via `os.path.basename(filepath)`
+- `Content-Disposition: attachment; filename="<basename>"` header to force
+  download
+- Filename extracted via `os.path.basename(filepath)`
 
 **File:** `fiftyone/server/routes/media.py` (add `MediaDownload` class)
 **File:** `fiftyone/server/routes/__init__.py` (register route)
@@ -55,14 +55,14 @@ Both buttons:
 
 ### User feedback
 
--   On click: button disabled, icon replaced with spinner
--   After ~2 seconds: spinner removed, button re-enabled
--   Prevents double-clicks; browser's native download manager handles progress
+- On click: button disabled, icon replaced with spinner
+- After ~2 seconds: spinner removed, button re-enabled
+- Prevents double-clicks; browser's native download manager handles progress
 
 ## What we don't build
 
--   **Batch download** — single-sample action only
--   **Format conversion** — original file as-is
--   **Custom filenames** — uses original filename from filepath
--   **Auth/authz** — follows existing `/media` security model
--   **Download progress bar** — browser native download UI handles this
+- **Batch download** — single-sample action only
+- **Format conversion** — original file as-is
+- **Custom filenames** — uses original filename from filepath
+- **Auth/authz** — follows existing `/media` security model
+- **Download progress bar** — browser native download UI handles this

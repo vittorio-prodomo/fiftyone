@@ -12,14 +12,36 @@ import {
   sampleFieldsFragment$data,
   sampleFieldsFragment$key,
 } from "@fiftyone/relay";
-import { StrictField, setContains3d } from "@fiftyone/utilities";
-import { DefaultValue, atom, atomFamily, selector } from "recoil";
+import {
+  MEDIA_TYPE_GROUP,
+  MEDIA_TYPE_MULTIMODAL,
+  MEDIA_TYPE_VIDEO,
+  StrictField,
+  setContains3d,
+} from "@fiftyone/utilities";
+import {
+  DefaultValue,
+  atom,
+  atomFamily,
+  selector,
+  selectorFamily,
+} from "recoil";
 import { ModalSample } from "..";
 import { GRID_SPACES_DEFAULT, sessionAtom } from "../session";
 import { collapseFields } from "../utils";
 import { getBrowserStorageEffectForKey } from "./customEffects";
-import { groupMediaTypesSet } from "./groups";
-import { State } from "./types";
+import {
+  currentSlice,
+  groupMediaTypesMap,
+  groupMediaTypesSet,
+  isTemporalTagSlice,
+} from "./groups";
+import type { SelectionType } from "./types";
+import {
+  DEFAULT_LABEL_SELECTION_STYLE,
+  DEFAULT_SELECTION_STYLE,
+  State,
+} from "./types";
 
 export const refresher = atom<number>({
   key: "refresher",
@@ -50,7 +72,7 @@ export const modal = (() => {
           });
         },
       ],
-    }
+    },
   );
 })();
 
@@ -130,7 +152,7 @@ export const tagging = atomFamily<boolean, { modal: boolean; labels: boolean }>(
   {
     key: "tagging",
     default: false,
-  }
+  },
 );
 
 export const mediaType = graphQLSyncFragmentAtom<
@@ -145,7 +167,7 @@ export const mediaType = graphQLSyncFragmentAtom<
   },
   {
     key: "mediaType",
-  }
+  },
 );
 
 export const flatSampleFields = graphQLSyncFragmentAtom<
@@ -160,7 +182,7 @@ export const flatSampleFields = graphQLSyncFragmentAtom<
   },
   {
     key: "flatSampleFields",
-  }
+  },
 );
 
 export const sampleFields = selector<StrictField[]>({
@@ -180,7 +202,7 @@ export const flatFrameFields = graphQLSyncFragmentAtom<
   },
   {
     key: "flatFrameFields",
-  }
+  },
 );
 
 export const frameFields = selector<StrictField[]>({
@@ -200,12 +222,22 @@ export const selectedLabels = sessionAtom({
 
 export const selectedSamples = sessionAtom({
   key: "selectedSamples",
-  default: new Set<string>(),
+  default: new Map<string, SelectionType>(),
 });
 
 export const selectedSampleObjects = atom<Map<string, Sample>>({
   key: "selectedSampleObjects",
   default: new Map(),
+});
+
+export const sampleSelectionStyle = sessionAtom({
+  key: "sampleSelectionStyle",
+  default: DEFAULT_SELECTION_STYLE,
+});
+
+export const labelSelectionStyle = sessionAtom({
+  key: "labelSelectionStyle",
+  default: DEFAULT_LABEL_SELECTION_STYLE,
 });
 
 // only used in extended view, for tagging purpose
@@ -251,57 +283,80 @@ export const similaritySorting = atom<boolean>({
   default: false,
 });
 
-export const extendedSelection = (() => {
-  let current = { selection: null };
-  return graphQLSyncFragmentAtom<
-    datasetFragment$key,
-    {
-      selection: string[];
-      scope?: string;
-      spatialSelection?: {
-        polygon: Array<Array<number>>;
-        field: string;
-      } | null;
-    }
-  >(
-    {
-      fragments: [datasetFragment],
-      keys: ["dataset"],
-      default: { selection: null },
-      read: (data, previous) => {
-        if (previous && data.id !== previous?.id) {
-          current = { selection: null };
-        }
+// `read` runs on every fragment update, so it must hand back the last write
+// or a refetch drops the selection. Module scope so the reset can clear it.
+let currentSelection = { selection: null };
+let currentOverrideStage = null;
 
-        return current;
-      },
+/** Clears what `read` hands back, so a reset survives the next update. */
+export function clearExtendedSelectionMirror(): void {
+  currentSelection = { selection: null };
+  currentOverrideStage = null;
+}
+
+export const extendedSelection = graphQLSyncFragmentAtom<
+  datasetFragment$key,
+  {
+    selection: string[];
+    scope?: string;
+    spatialSelection?: {
+      polygon: Array<Array<number>>;
+      field: string;
+    } | null;
+  }
+>(
+  {
+    fragments: [datasetFragment],
+    keys: ["dataset"],
+    default: { selection: null },
+    read: (data, previous) => {
+      if (previous && data.id !== previous?.id) {
+        currentSelection = { selection: null };
+      }
+
+      return currentSelection;
     },
-    {
-      key: "extendedSelection",
-    }
-  );
-})();
-
-export const extendedSelectionOverrideStage = (() => {
-  let current = null;
-  return graphQLSyncFragmentAtom<datasetFragment$key, any>(
-    {
-      fragments: [datasetFragment],
-      keys: ["dataset"],
-      default: null,
-      read: (data, previous) => {
-        if (previous && data.id !== previous?.id) {
-          current = null;
-        }
-
-        return current;
+  },
+  {
+    key: "extendedSelection",
+    effects: [
+      ({ onSet }) => {
+        onSet((value) => {
+          currentSelection =
+            value instanceof DefaultValue ? { selection: null } : value;
+        });
       },
+    ],
+  },
+);
+
+export const extendedSelectionOverrideStage = graphQLSyncFragmentAtom<
+  datasetFragment$key,
+  any
+>(
+  {
+    fragments: [datasetFragment],
+    keys: ["dataset"],
+    default: null,
+    read: (data, previous) => {
+      if (previous && data.id !== previous?.id) {
+        currentOverrideStage = null;
+      }
+
+      return currentOverrideStage;
     },
-    {
-      key: "extendedSelectionOverrideStage",
-    }
-  );
-})();
+  },
+  {
+    key: "extendedSelectionOverrideStage",
+    effects: [
+      ({ onSet }) => {
+        onSet((value) => {
+          currentOverrideStage = value instanceof DefaultValue ? null : value;
+        });
+      },
+    ],
+  },
+);
 
 export const similarityParameters = (() => {
   let update = false;
@@ -331,7 +386,7 @@ export const similarityParameters = (() => {
     },
     {
       key: "similarityParameters",
-    }
+    },
   );
 })();
 
@@ -356,6 +411,29 @@ export const lookerPanels = atom({
     json: { isOpen: false },
     help: { isOpen: false },
   },
+});
+
+/**
+ * Whether the samples in view can carry temporal tags: they need a playhead to
+ * place an interval on. Multimodal episodes and videos qualify; in a grouped
+ * dataset, only a video slice does. Keyed by `modal`, since the modal can show
+ * a different slice than the grid.
+ */
+export const supportsTemporalTags = selectorFamily<boolean, boolean>({
+  key: "supportsTemporalTags",
+  get:
+    (modal) =>
+    ({ get }) => {
+      const type = get(mediaType);
+      if (type === MEDIA_TYPE_GROUP) {
+        return isTemporalTagSlice(
+          get(groupMediaTypesMap),
+          get(currentSlice(modal)),
+        );
+      }
+
+      return type === MEDIA_TYPE_MULTIMODAL || type === MEDIA_TYPE_VIDEO;
+    },
 });
 
 export const only3d = selector<boolean>({

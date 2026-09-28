@@ -5,6 +5,10 @@ Label Studio Integration
 
 .. default-role:: code
 
+.. customavailablein::
+    :oss_version: 0.16.6
+    :enterprise_version: 1.0
+
 `Label Studio <https://labelstud.io/>`_ is a popular open-source data labeling
 tool with a friendly UI. The integration between FiftyOne and Label Studio
 allows you to easily upload your data directly from FiftyOne to Label Studio
@@ -213,7 +217,7 @@ or by setting the `default_backend` parameter of your
 :ref:`annotation config <annotation-config>` located at
 `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "default_backend": "labelstudio"
@@ -241,12 +245,12 @@ You can also store your credentials in your
 :ref:`annotation config <annotation-config>` located at
 `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "backends": {
             "labelstudio": {
-                "api_key": ...,
+                "api_key": "<api_key>"
             }
         }
     }
@@ -311,7 +315,7 @@ following ways:
     :ref:`annotation config <annotation-config>` at
     `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "backends": {
@@ -339,6 +343,10 @@ following ways:
 
 Configuring local file storage
 ------------------------------
+
+.. customavailablein::
+    :oss_version: 0.23.6
+    :enterprise_version: 1.5.7
 
 If you are using FiftyOne on the same machine that is hosting Label Studio,
 then you can make use of the
@@ -443,12 +451,13 @@ more details:
     by this argument nor `label_schema`, they are parsed from
     :meth:`Dataset.classes <fiftyone.core.dataset.Dataset.classes>` or
     :meth:`Dataset.default_classes <fiftyone.core.dataset.Dataset.default_classes>`
--   **mask_targets** (*None*): a dict mapping pixel values to semantic label
-    strings. Only applicable when annotating semantic segmentations. All new
-    label fields must have mask targets provided via one of the supported
-    methods. For existing label fields, if mask targets are not provided by
-    this argument nor `label_schema`, any applicable mask targets stored on
-    your dataset will be used, if available
+-   **mask_targets** (*None*): a dict mapping pixel values (2D masks) or RGB
+    hex strings (3D masks) to semantic label strings. Only applicable when
+    annotating semantic segmentations. All new label fields must have mask
+    targets provided via one of the supported methods. For existing label
+    fields, if mask targets are not provided by this argument nor
+    `label_schema`, any applicable mask targets stored on your dataset will be
+    used, if available
 
 |br|
 In addition, the following Label Studio-specific parameters from

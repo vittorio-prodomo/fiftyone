@@ -1,7 +1,7 @@
 import { useAnalyticsInfo } from "@fiftyone/analytics";
 import { Markdown } from "@fiftyone/components";
 import * as fos from "@fiftyone/state";
-import { debounce } from "lodash";
+import { debounce, omit } from "lodash";
 import React, {
   useCallback,
   useEffect,
@@ -23,6 +23,7 @@ import {
 import {
   BROWSER_CONTROL_KEYS,
   RESOLVE_INPUT_VALIDATION_TTL,
+  RESOLVE_LOOP_WINDOW_MS,
   RESOLVE_TYPE_TTL,
 } from "./constants";
 import {
@@ -37,7 +38,11 @@ import {
   resolveOperatorURI,
 } from "./operators";
 import { OperatorPromptType, Places } from "./types";
-import { OperatorExecutorOptions } from "./types-internal";
+import {
+  ExecutionCallback,
+  ExecutionCallbackOptions,
+  OperatorExecutorOptions,
+} from "./ts";
 import { generateOperatorSessionId, optimizeCtx } from "./utils";
 import { ValidationContext } from "./validation";
 
@@ -67,9 +72,19 @@ export const showOperatorPromptSelector = selector({
   },
 });
 
+/** Whether the open operator prompt belongs to this action. */
+export function useOperatorPromptOpen(uri: string): boolean {
+  const prompt = useRecoilValue(promptingOperatorState);
+  return (
+    !!prompt &&
+    resolveOperatorURI(prompt.operatorName, { keepMethod: true }) ===
+      resolveOperatorURI(uri, { keepMethod: true })
+  );
+}
+
 export const usePromptOperatorInput = () => {
   const setRecentlyUsedOperators = useSetRecoilState(
-    recentlyUsedOperatorsState
+    recentlyUsedOperatorsState,
   );
   const setPromptingOperator = useSetRecoilState(promptingOperatorState);
 
@@ -100,6 +115,8 @@ const globalContextSelector = selector({
     const extended = get(fos.extendedStages);
     const filters = get(fos.filters);
     const selectedSamples = get(fos.selectedSamples);
+    const sampleSelectionStyle = get(fos.sampleSelectionStyle);
+    const labelSelectionStyle = get(fos.labelSelectionStyle);
     const selectedLabels = get(fos.selectedLabels);
     const viewName = get(fos.viewName);
     const extendedSelection = get(fos.extendedSelection);
@@ -115,6 +132,8 @@ const globalContextSelector = selector({
       extended,
       filters,
       selectedSamples,
+      sampleSelectionStyle,
+      labelSelectionStyle,
       selectedLabels,
       viewName,
       extendedSelection,
@@ -158,6 +177,8 @@ const useExecutionContext = (operatorName, hooks = {}) => {
     extended,
     filters,
     selectedSamples,
+    sampleSelectionStyle,
+    labelSelectionStyle,
     params,
     selectedLabels,
     viewName,
@@ -180,6 +201,8 @@ const useExecutionContext = (operatorName, hooks = {}) => {
         extended,
         filters,
         selectedSamples,
+        sampleSelectionStyle,
+        labelSelectionStyle,
         selectedLabels,
         currentSample,
         viewName,
@@ -192,7 +215,7 @@ const useExecutionContext = (operatorName, hooks = {}) => {
         promptId,
         activeFields,
       },
-      hooks
+      hooks,
     );
   }, [
     params,
@@ -201,10 +224,14 @@ const useExecutionContext = (operatorName, hooks = {}) => {
     extended,
     filters,
     selectedSamples,
+    sampleSelectionStyle,
+    labelSelectionStyle,
     selectedLabels,
     hooks,
     viewName,
     currentSample,
+    extendedSelection,
+    analyticsInfo,
     groupSlice,
     queryPerformance,
     spaces,
@@ -220,25 +247,28 @@ function useExecutionOptions(operatorURI, ctx, isRemote) {
   const [isLoading, setIsLoading] = useState(true);
   const [executionOptions, setExecutionOptions] = useState(null);
 
-  const fetch = useCallback(
-    debounce(async (ctxOverride = null) => {
-      if (!isRemote) {
-        setExecutionOptions({ allowImmediateExecution: true });
-        return;
-      }
-      if (!ctxOverride) setIsLoading(true); // only show loading if loading the first time
-      const options = await resolveExecutionOptions(
-        operatorURI,
-        ctxOverride || ctx
-      );
-      setExecutionOptions(options);
-      setIsLoading(false);
-    }),
-    [operatorURI, ctx, isRemote]
+  const fetch = useMemo(
+    () =>
+      debounce(async (ctxOverride = null) => {
+        if (!isRemote) {
+          setExecutionOptions({ allowImmediateExecution: true });
+          return;
+        }
+        if (!ctxOverride) setIsLoading(true); // only show loading if loading the first time
+        const options = await resolveExecutionOptions(
+          operatorURI,
+          ctxOverride || ctx,
+        );
+        setExecutionOptions(options);
+        setIsLoading(false);
+      }),
+    [operatorURI, ctx, isRemote],
   );
 
   useEffect(() => {
     fetch();
+    // fetch once on mount; refetches happen explicitly via the returned fetch
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return { isLoading, executionOptions, fetch };
@@ -261,129 +291,142 @@ export type OperatorExecutionOption = {
   isDisabledSchedule?: boolean;
 };
 
-const useOperatorPromptSubmitOptions = (
+export const useOperatorPromptSubmitOptions = (
   operatorURI,
   execDetails,
   execute: (options?: OperatorExecutorOptions) => void,
-  promptView?: OperatorPromptType["promptView"]
+  promptView?: OperatorPromptType["promptView"],
 ) => {
-  const options: OperatorExecutionOption[] = [];
   const persistUnderKey = `operator-prompt-${operatorURI}`;
-  const availableOrchestrators =
-    execDetails.executionOptions?.availableOrchestrators || [];
-  const hasAvailableOrchestrators = availableOrchestrators.length > 0;
   const executionOptions = execDetails.executionOptions || {};
-  const defaultToExecute = executionOptions.allowDelegatedExecution
-    ? !executionOptions.defaultChoiceToDelegated
-    : true;
-  const defaultToSchedule = executionOptions.allowDelegatedExecution
-    ? executionOptions.defaultChoiceToDelegated
-    : false;
-  if (executionOptions.allowImmediateExecution) {
-    options.push({
-      label:
-        promptView?.submitButtonLabel ||
-        promptView?.submit_button_label ||
-        "Execute",
-      id: "execute",
-      tag: "FOR TESTING",
-      default: defaultToExecute,
-      description:
-        "Run this operation synchronously. Only suitable for small datasets",
-      onSelect() {
-        setSelectedID("execute");
-      },
-      onClick() {
-        execute();
-      },
-      isDelegated: false,
-    });
-  }
-  if (
-    executionOptions.allowDelegatedExecution &&
-    !executionOptions.orchestratorRegistrationEnabled
-  ) {
-    options.push({
-      label: "Schedule",
-      id: "schedule",
-      default: defaultToSchedule,
-      description: "Run this operation in the background",
-      onSelect() {
-        setSelectedID("schedule");
-      },
-      onClick() {
-        execute({ requestDelegation: true });
-      },
-      isDelegated: true,
-    });
-  }
+  const hasAvailableOrchestrators =
+    (executionOptions.availableOrchestrators || []).length > 0;
+  const [selectedID, setSelectedID] = fos.useBrowserStorage(
+    persistUnderKey,
+    executionOptions.allowImmediateExecution ? "execute" : "schedule",
+  );
 
-  if (
-    executionOptions.allowDelegatedExecution &&
-    hasAvailableOrchestrators &&
-    executionOptions.orchestratorRegistrationEnabled
-  ) {
-    for (let orc of execDetails.executionOptions.availableOrchestrators) {
+  const options: OperatorExecutionOption[] = useMemo(() => {
+    const options: OperatorExecutionOption[] = [];
+    const availableOrchestrators =
+      execDetails.executionOptions?.availableOrchestrators || [];
+    const hasAvailableOrchestrators = availableOrchestrators.length > 0;
+    const executionOptions = execDetails.executionOptions || {};
+    const defaultToExecute = executionOptions.allowDelegatedExecution
+      ? !executionOptions.defaultChoiceToDelegated
+      : true;
+    const defaultToSchedule = executionOptions.allowDelegatedExecution
+      ? executionOptions.defaultChoiceToDelegated
+      : false;
+    if (executionOptions.allowImmediateExecution) {
       options.push({
-        label: "Schedule",
-        choiceLabel: `Schedule on ${orc.instanceID}`,
-        id: orc.id,
-        description: `Run this operation on ${orc.instanceID}`,
+        label:
+          promptView?.submitButtonLabel ||
+          promptView?.submit_button_label ||
+          "Execute",
+        id: "execute",
+        tag: "FOR TESTING",
+        default: defaultToExecute,
+        description:
+          "Run this operation synchronously. Only suitable for small datasets",
         onSelect() {
-          setSelectedID(orc.id);
+          setSelectedID("execute");
         },
         onClick() {
-          execute({
-            delegationTarget: orc.instanceID,
-            requestDelegation: true,
-          });
+          execute();
+        },
+        isDelegated: false,
+      });
+    }
+    if (
+      executionOptions.allowDelegatedExecution &&
+      !executionOptions.orchestratorRegistrationEnabled
+    ) {
+      options.push({
+        label: "Schedule",
+        id: "schedule",
+        default: defaultToSchedule,
+        description: "Run this operation in the background",
+        onSelect() {
+          setSelectedID("schedule");
+        },
+        onClick() {
+          execute({ requestDelegation: true });
         },
         isDelegated: true,
       });
     }
-  } else if (
-    executionOptions.allowDelegatedExecution &&
-    executionOptions.allowImmediateExecution &&
-    executionOptions.orchestratorRegistrationEnabled &&
-    !hasAvailableOrchestrators
-  ) {
-    const markdownDesc = React.createElement(
-      Markdown,
-      null,
-      "[Learn how](https://docs.voxel51.com/plugins/using_plugins.html#delegated-operations) to run this operation in the background"
-    );
-    options.push({
-      label: "Schedule",
-      choiceLabel: `Schedule`,
-      tag: "NOT AVAILABLE",
-      id: "disabled-schedule",
-      description: markdownDesc,
-      isDelegated: true,
-      isDisabledSchedule: true,
+
+    if (
+      executionOptions.allowDelegatedExecution &&
+      hasAvailableOrchestrators &&
+      executionOptions.orchestratorRegistrationEnabled
+    ) {
+      for (const [
+        index,
+        orc,
+      ] of execDetails.executionOptions.availableOrchestrators.entries()) {
+        options.push({
+          label: "Schedule",
+          choiceLabel: `Schedule on ${orc.instanceID}`,
+          id: orc.id,
+          default: defaultToSchedule && index === 0,
+          description: `Run this operation on ${orc.instanceID}`,
+          onSelect() {
+            setSelectedID(orc.id);
+          },
+          onClick() {
+            execute({
+              delegationTarget: orc.instanceID,
+              requestDelegation: true,
+            });
+          },
+          isDelegated: true,
+        });
+      }
+    } else if (
+      executionOptions.allowDelegatedExecution &&
+      executionOptions.allowImmediateExecution &&
+      executionOptions.orchestratorRegistrationEnabled &&
+      !hasAvailableOrchestrators
+    ) {
+      const markdownDesc = React.createElement(
+        Markdown,
+        null,
+        "[Learn how](https://docs.voxel51.com/plugins/using_plugins.html#delegated-operations) to run this operation in the background",
+      );
+      options.push({
+        label: "Schedule",
+        choiceLabel: `Schedule`,
+        tag: "NOT AVAILABLE",
+        id: "disabled-schedule",
+        description: markdownDesc,
+        isDelegated: true,
+        isDisabledSchedule: true,
+      });
+    }
+
+    // sort options so that the default is always the first in the list
+    options.sort((a, b) => {
+      if (a.default) return -1;
+      if (b.default) return 1;
+      return 0;
     });
-  }
 
-  // sort options so that the default is always the first in the list
-  options.sort((a, b) => {
-    if (a.default) return -1;
-    if (b.default) return 1;
-    return 0;
-  });
+    for (const option of options) {
+      if (option.id === selectedID) {
+        option.selected = true;
+      }
+    }
 
-  const fallbackId = executionOptions.allowImmediateExecution
-    ? "execute"
-    : "schedule";
-
-  const defaultID =
-    options.find((option) => option.default)?.id ||
-    options[0]?.id ||
-    fallbackId;
-
-  let [selectedID, setSelectedID] = fos.useBrowserStorage(
-    persistUnderKey,
-    defaultID
-  );
-  const selectedOption = options.find((option) => option.id === selectedID);
+    return options;
+  }, [
+    execDetails.executionOptions,
+    execute,
+    promptView,
+    selectedID,
+    setSelectedID,
+  ]);
 
   useEffect(() => {
     const selectedOptionExists = !!options.find((o) => o.id === selectedID);
@@ -394,7 +437,7 @@ const useOperatorPromptSubmitOptions = (
         options.find((option) => option.default)?.id || options[0]?.id;
       setSelectedID(nextSelectedID);
     }
-  }, [options]);
+  }, [options, selectedID, setSelectedID]);
 
   const handleSubmit = useCallback(() => {
     const selectedOption = options.find((option) => option.id === selectedID);
@@ -403,23 +446,17 @@ const useOperatorPromptSubmitOptions = (
     }
   }, [options, selectedID]);
 
-  if (selectedOption) selectedOption.selected = true;
-  const showWarning =
+  const requiresOrchestratorSetup =
     executionOptions.orchestratorRegistrationEnabled &&
     !hasAvailableOrchestrators &&
     !executionOptions.allowImmediateExecution;
-  const warningStr =
-    "This operation requires [delegated execution](https://docs.voxel51.com/plugins/using_plugins.html#delegated-operations)";
-  const warningMessage = React.createElement(Markdown, null, warningStr);
 
   return {
-    showWarning,
-    warningTitle: "No available orchestrators",
-    warningMessage,
-    options,
+    handleSubmit,
     hasOptions: options.length > 0,
     isLoading: execDetails.isLoading,
-    handleSubmit,
+    options,
+    requiresOrchestratorSetup,
   };
 };
 
@@ -431,27 +468,26 @@ export const useOperatorExecutionOptions = ({
   onExecute,
 }: {
   operatorUri: string;
-  onExecute: (opts: OperatorExecutorOptions) => void;
+  onExecute: (options?: OperatorExecutorOptions) => void;
 }): {
   executionOptions: OperatorExecutionOption[];
+  requiresOrchestratorSetup: boolean;
 } => {
   const ctx = useExecutionContext(operatorUri);
   const { isRemote } = getLocalOrRemoteOperator(operatorUri);
   const execDetails = useExecutionOptions(operatorUri, ctx, isRemote);
-  const submitOptions = useOperatorPromptSubmitOptions(
+  const { options, requiresOrchestratorSetup } = useOperatorPromptSubmitOptions(
     operatorUri,
     execDetails,
-    onExecute
+    onExecute,
   );
 
-  return {
-    executionOptions: submitOptions.options,
-  };
+  return { executionOptions: options, requiresOrchestratorSetup };
 };
 
 export const useOperatorPrompt = () => {
   const [promptingOperator, setPromptingOperator] = useRecoilState(
-    promptingOperatorState
+    promptingOperatorState,
   );
   const containerRef = useRef();
   const resolveTypeError = useRef();
@@ -477,15 +513,29 @@ export const useOperatorPrompt = () => {
     return inputFields?.view;
   }, [inputFields]);
   const params = ctx.params;
+  // A field declaring `resolve_on_change: false` is a plain value the form
+  // never needs the server to react to, so it is left out of the key that
+  // re-resolves a dynamic operator
+  const inertPaths = useMemo(
+    () => collectInertPaths(resolvedIO.input?.type),
+    [resolvedIO.input],
+  );
   const serializedParams = useMemo(() => {
-    return JSON.stringify(params);
-  }, [params]);
+    return JSON.stringify(omit(params, inertPaths));
+  }, [params, inertPaths]);
+  // Compared against `serializedParams` to tell a settled form from one
+  // still resolving, so it must drop the same inert paths
   const serializedResolvedParams = useMemo(() => {
-    return JSON.stringify(resolvedParams);
-  }, [resolvedParams]);
+    return JSON.stringify(
+      resolvedParams ? omit(resolvedParams, inertPaths) : resolvedParams,
+    );
+  }, [resolvedParams, inertPaths]);
   const liteValuesRef = useRef({});
   const promptId = promptingOperator.id;
 
+  // the debounced resolver must keep its identity across renders so the
+  // debounce window survives; deps are intentionally narrow
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const resolveInput = useCallback(
     debounce(
       async (ctx) => {
@@ -512,46 +562,92 @@ export const useOperatorPrompt = () => {
         setResolvedParams(ctx.params);
       },
       operator.isRemote ? RESOLVE_TYPE_TTL : 0,
-      { leading: true, trailing: true }
+      { leading: true, trailing: true },
     ),
-    [cachedResolvedInput, setResolvedParams, operator.uri]
+    [cachedResolvedInput, setResolvedParams, operator.uri],
   );
   const resolveInputFields = useCallback(async () => {
     ctx.hooks = hooks;
     resolveInput(ctx);
-  }, [ctx, operatorName, hooks, serializedParams]);
+  }, [ctx, hooks, resolveInput]);
 
-  const validate = useCallback((ctx, resolved) => {
-    return new Promise<{
-      invalid: boolean;
-      errors: any;
-      validationContext: any;
-    }>((resolve) => {
-      setTimeout(() => {
-        const validationContext = new ValidationContext(
-          ctx,
-          resolved,
-          operator
-        );
-        const validationErrors = validationContext.toProps().errors;
-        setValidationErrors(validationErrors);
-        resolve({
-          invalid: validationContext.invalid,
-          errors: validationErrors,
-          validationContext,
-        });
-      }, 0);
-    });
-  }, []);
+  const validate = useCallback(
+    (ctx, resolved) => {
+      return new Promise<{
+        invalid: boolean;
+        errors: unknown[];
+        validationContext: ValidationContext;
+      }>((resolve) => {
+        setTimeout(() => {
+          const validationContext = new ValidationContext(
+            ctx,
+            resolved,
+            operator,
+          );
+          const validationErrors = validationContext.toProps().errors;
+          setValidationErrors(validationErrors);
+          resolve({
+            invalid: validationContext.invalid,
+            errors: validationErrors,
+            validationContext,
+          });
+        }, 0);
+      });
+    },
+    [operator],
+  );
+  // the throttled validator must keep its identity so the throttle window
+  // survives across renders
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const validateThrottled = useCallback(
     debounce(validate, RESOLVE_INPUT_VALIDATION_TTL, { leading: true }),
-    []
+    [],
   );
 
+  const recentParams = useRef<{ key: string; at: number }[]>([]);
   useEffect(() => {
     if (executor.isExecuting || executor.hasExecuted) return;
+    // A form whose answer flips its own inputs back and forth requests
+    // forever. Four alternating resolves inside the window is that loop; a
+    // person toggling a field is far slower
+    const recent = recentParams.current;
+    const now = Date.now();
+    if (
+      recent.length >= 3 &&
+      recent[recent.length - 1].key === recent[recent.length - 3].key &&
+      serializedParams === recent[recent.length - 2].key &&
+      now - recent[recent.length - 3].at < RESOLVE_LOOP_WINDOW_MS
+    ) {
+      console.warn(
+        `[operators] ${operatorName} keeps resolving to alternating inputs; ` +
+          "not resolving again until the inputs change",
+      );
+      return;
+    }
+    recentParams.current = [
+      ...recent.slice(-3),
+      { key: serializedParams, at: now },
+    ];
     resolveInputFields();
+    // re-resolve inputs only when params change; keying on the resolver would
+    // re-fire every render because hooks is rebuilt each time
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serializedParams, executor.isExecuting]);
+  // Validation only runs inside a resolve, and a change to an inert field
+  // never resolves, so its errors are checked here against the last resolved
+  // inputs
+  const serializedAllParams = useMemo(() => JSON.stringify(params), [params]);
+  useEffect(() => {
+    if (
+      inertPaths.length === 0 ||
+      !resolvedIO.input ||
+      serializedParams !== serializedResolvedParams
+    ) {
+      return;
+    }
+    validateThrottled(ctx, resolvedIO.input);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serializedAllParams]);
   const resolveOutputFields = useCallback(async () => {
     ctx.hooks = hooks;
     const result = new OperatorResult(operator, executor.result, null, null);
@@ -562,12 +658,15 @@ export const useOperatorPrompt = () => {
     } else {
       setOutputFields(null);
     }
-  }, [ctx, operatorName, hooks, JSON.stringify(executor.result)]);
+  }, [ctx, hooks, operator, executor.result]);
 
   useEffect(() => {
     if (executor.result) {
       resolveOutputFields();
     }
+    // resolve outputs once per result; keying on the resolver would re-fire
+    // every render because hooks is rebuilt each time
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [executor.result]);
 
   const setFieldValue = useRecoilTransaction_UNSTABLE(
@@ -583,7 +682,7 @@ export const useOperatorPrompt = () => {
             },
           });
         }
-      }
+      },
   );
 
   const setLiteValues = useCallback((liteValues) => {
@@ -604,14 +703,22 @@ export const useOperatorPrompt = () => {
         ...promptingOperator.options,
       });
     },
-    [operator, promptingOperator, cachedResolvedInput, params]
+    [
+      operator,
+      promptingOperator,
+      cachedResolvedInput,
+      params,
+      ctx,
+      executor,
+      validate,
+    ],
   );
-  const close = () => {
+  const close = useCallback(() => {
     setPromptingOperator(null);
     setInputFields(null);
     setOutputFields(null);
     executor.clear();
-  };
+  }, [executor, setPromptingOperator]);
 
   const autoExec = async () => {
     const needsInput = operator && (await operator.needsUserInput(ctx));
@@ -623,6 +730,9 @@ export const useOperatorPrompt = () => {
 
   useEffect(() => {
     autoExec();
+    // auto-execute exactly once per operator; keying on autoExec/ctx would
+    // re-execute the operator whenever the context changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [operator]);
 
   const isExecuting = executor && executor.isExecuting;
@@ -656,15 +766,16 @@ export const useOperatorPrompt = () => {
     operator.uri,
     execDetails,
     execute,
-    promptView
+    promptView,
   );
 
+  const { handleSubmit } = submitOptions;
   const onSubmit = useCallback(
     (e) => {
       if (e) e.preventDefault();
-      submitOptions.handleSubmit();
+      handleSubmit();
     },
-    [submitOptions?.handleSubmit]
+    [handleSubmit],
   );
 
   const computedValidationErrors = useMemo(() => {
@@ -772,6 +883,12 @@ export const availableOperatorsRefreshCount = atom({
 
 export const operatorsInitializedAtom = atom({
   key: "operatorsInitializedAtom",
+  default: false,
+});
+
+/** The server listing failed, so the registry will not fill in on its own. */
+export const operatorsLoadFailedAtom = atom({
+  key: "operatorsLoadFailedAtom",
   default: false,
 });
 
@@ -916,7 +1033,7 @@ export function useOperatorBrowser() {
 
   const getSelectedPrevAndNext = useCallback(() => {
     const selectedIndex = choices.findIndex(
-      ({ value }) => value === selectedValue
+      ({ value }) => value === selectedValue,
     );
     const selected = choices[selectedIndex];
     const lastChoice = choices[choices.length - 1];
@@ -980,12 +1097,13 @@ export function useOperatorBrowser() {
       close,
       setIsVisible,
       isOperatorPaletteOpened,
-    ]
+      editingField,
+    ],
   );
 
   const toggle = useCallback(() => {
     setIsVisible((isVisible) => !isVisible);
-  }, []);
+  }, [setIsVisible]);
 
   useEffect(() => {
     document.addEventListener("keydown", onKeyDown);
@@ -1001,7 +1119,7 @@ export function useOperatorBrowser() {
         promptForInput(choice.value);
       }
     },
-    [close, promptForInput]
+    [close, promptForInput],
   );
 
   const clear = () => {
@@ -1024,6 +1142,14 @@ export function useOperatorBrowser() {
     hasQuery: typeof query === "string" && query.length > 0,
     query,
   };
+}
+
+/**
+ * Result of attempting to load a local or remote operator.
+ */
+export enum OperatorLoadResult {
+  SUCCESS = "SUCCESS",
+  NOT_FOUND = "NOT_FOUND",
 }
 
 /**
@@ -1065,10 +1191,36 @@ export function useOperatorBrowser() {
  * }, [executor]);
  * ```
  */
-export function useOperatorExecutor(uri, handlers: any = {}) {
+export function useOperatorExecutor(
+  uri,
+  handlers: {
+    onSuccess?: ExecutionCallback;
+    onError?: (
+      result: OperatorResult,
+      options?: ExecutionCallbackOptions,
+    ) => void;
+  } = {},
+) {
   uri = resolveOperatorURI(uri, { keepMethod: true });
 
-  const { operator } = getLocalOrRemoteOperator(uri);
+  let operator;
+  let loadResult: OperatorLoadResult;
+  try {
+    operator = getLocalOrRemoteOperator(uri).operator;
+    loadResult = OperatorLoadResult.SUCCESS;
+  } catch (err) {
+    // operator does not exist
+    operator = {};
+    loadResult = OperatorLoadResult.NOT_FOUND;
+  }
+
+  // If the operator fails to load AND the consumer tries to call execute,
+  // this error gets set and will be thrown on the next render
+  const [resolutionError, setResolutionError] = useState<Error | null>(null);
+  if (resolutionError) {
+    throw resolutionError;
+  }
+
   const [isExecuting, setIsExecuting] = useState(false);
 
   const [error, setError] = useState(null);
@@ -1079,7 +1231,7 @@ export function useOperatorExecutor(uri, handlers: any = {}) {
   const [needsOutput, setNeedsOutput] = useState(false);
   const context = useExecutionContext(uri);
   const currentSample = useCurrentSample();
-  const hooks = operator.useHooks(context);
+  const hooks = operator?.useHooks?.(context) ?? {};
   const notify = fos.useNotification();
 
   const clear = useCallback(() => {
@@ -1092,17 +1244,27 @@ export function useOperatorExecutor(uri, handlers: any = {}) {
 
   const execute = useRecoilCallback(
     (state) => async (paramOverrides, options?: OperatorExecutorOptions) => {
+      // exit early if operator did not load successfully
+      if (loadResult !== OperatorLoadResult.SUCCESS) {
+        // defer throw to next render rather than throwing directly;
+        // this better contextualizes the cause of the error
+        setResolutionError(
+          new Error(`Operator "${uri}" not found or not accessible`),
+        );
+        return;
+      }
+
       const { delegationTarget, requestDelegation, skipOutput, callback } =
         options || {};
       setIsExecuting(true);
       const { params, ...currentContext } = await state.snapshot.getPromise(
-        currentContextSelector(uri)
+        currentContextSelector(uri),
       );
 
       const ctx = new ExecutionContext(
         paramOverrides || params,
         { ...currentContext, currentSample },
-        hooks
+        hooks,
       );
       ctx.state = state;
       ctx.delegationTarget = delegationTarget;
@@ -1112,7 +1274,7 @@ export function useOperatorExecutor(uri, handlers: any = {}) {
         ctx.state = state;
         const result = await executeOperatorWithContext(uri, ctx);
         setNeedsOutput(
-          skipOutput ? false : await operator.needsOutput(ctx, result)
+          skipOutput ? false : await operator.needsOutput(ctx, result),
         );
         setResult(result.result);
         setError(result.error);
@@ -1148,7 +1310,7 @@ export function useOperatorExecutor(uri, handlers: any = {}) {
       setHasExecuted(true);
       setIsExecuting(false);
     },
-    [currentSample, context]
+    [currentSample, context, loadResult],
   );
   return {
     isExecuting,
@@ -1160,6 +1322,7 @@ export function useOperatorExecutor(uri, handlers: any = {}) {
     clear,
     hasResultOrError: result || error,
     isDelegated,
+    loadResult,
   };
 }
 
@@ -1234,7 +1397,7 @@ export const placementsForPlaceSelector = selectorFamily({
       const placements = get(operatorPlacementsAtom);
       return placements
         .filter(
-          (p) => p.placement.place === place && p.operator?.config?.canExecute
+          (p) => p.placement.place === place && p.operator?.config?.canExecute,
         )
         .map(({ placement, operator }) => ({ placement, operator }));
     },
@@ -1250,3 +1413,68 @@ export const activePanelsEventCountAtom = atom({
   key: "activePanelsEventCountAtom",
   default: new Map<string, number>(),
 });
+
+export const useViewTargetSampleCounts = () => {
+  const isGroup = useRecoilValue(fos.isGroup);
+  const aggregation = useRecoilValue(
+    fos.aggregation({ path: "", extended: true, modal: false }),
+  );
+  const count = useRecoilValue(
+    fos.count({ path: "", extended: true, modal: false }),
+  );
+  const groupStatistics = useRecoilValue(fos.groupStatistics(false));
+
+  let viewSampleCount = count ?? 0;
+  if (isGroup) {
+    viewSampleCount =
+      aggregation?.__typename === "RootAggregation"
+        ? ((groupStatistics === "group"
+            ? aggregation.slice
+            : aggregation.count) ?? 0)
+        : 0;
+  }
+
+  return {
+    datasetSampleCount: useRecoilValue(fos.datasetSampleCount) ?? 0,
+    viewSampleCount,
+    selectionSampleCount: useRecoilValue(fos.selectedSamples)?.size ?? 0,
+    selectionLabelCount: useRecoilValue(fos.selectedLabels)?.length ?? 0,
+  };
+};
+
+export const useViewTargetGroupConstraints = () => {
+  const isGroup = useRecoilValue(fos.isGroup);
+  const parentMediaType = useRecoilValue(fos.parentMediaTypeSelector);
+  const slice = useRecoilValue(fos.groupSlice);
+
+  return {
+    isGroupedDataset: isGroup || parentMediaType === "group",
+    viewIsFlattened: !isGroup && parentMediaType === "group",
+    slice,
+  };
+};
+
+/** Param paths whose field is marked `resolve_on_change: false`, nested
+ * objects included, as `omit` paths. */
+function collectInertPaths(
+  type: unknown,
+  prefix = "",
+  out: string[] = [],
+): string[] {
+  const properties = (type as { properties?: unknown } | null)?.properties;
+  if (!(properties instanceof Map)) return out;
+  for (const [name, property] of properties) {
+    const path = prefix ? `${prefix}.${name}` : name;
+    // The resolved schema keeps each view as raw JSON, so the flag sits on
+    // the view itself; a constructed View keeps it under `options`
+    const view = property?.view;
+    if (
+      view?.resolve_on_change === false ||
+      view?.options?.resolve_on_change === false
+    ) {
+      out.push(path);
+    }
+    collectInertPaths(property?.type, path, out);
+  }
+  return out;
+}

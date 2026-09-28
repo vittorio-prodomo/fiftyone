@@ -5,6 +5,10 @@ Labelbox Integration
 
 .. default-role:: code
 
+.. customavailablein::
+    :oss_version: 0.14.3
+    :enterprise_version: 1.0
+
 `Labelbox <https://labelbox.com/>`_ is one of the most popular cloud-based
 image and video annotation tools available, and we've made it easy to upload
 your data directly from FiftyOne to Labelbox for labeling.
@@ -230,7 +234,7 @@ or by setting the `default_backend` parameter of your
 :ref:`annotation config <annotation-config>` located at
 `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "default_backend": "labelbox"
@@ -258,12 +262,12 @@ You can also store your credentials in your
 :ref:`annotation config <annotation-config>` located at
 `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "backends": {
             "labelbox": {
-                "api_key": ...,
+                "api_key": "<api_key>"
             }
         }
     }
@@ -329,7 +333,7 @@ you can configure the URL of your server in any of the following ways:
     :ref:`annotation config <annotation-config>` at
     `~/.fiftyone/annotation_config.json`:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "backends": {
@@ -455,12 +459,13 @@ details:
     If a `label_schema` is also provided, this parameter determines which
     attributes are included for all fields that do not explicitly define their
     per-field attributes (in addition to any per-class attributes)
--   **mask_targets** (*None*): a dict mapping pixel values to semantic label
-    strings. Only applicable when annotating semantic segmentations. All new
-    label fields must have mask targets provided via one of the supported
-    methods. For existing label fields, if mask targets are not provided by
-    this argument nor `label_schema`, any applicable mask targets stored on
-    your dataset will be used, if available
+-   **mask_targets** (*None*): a dict mapping pixel values (2D masks) or RGB
+    hex strings (3D masks) to semantic label strings. Only applicable when
+    annotating semantic segmentations. All new label fields must have mask
+    targets provided via one of the supported methods. For existing label
+    fields, if mask targets are not provided by this argument nor
+    `label_schema`, any applicable mask targets stored on your dataset will be
+    used, if available
 -   **allow_additions** (*True*): whether to allow new labels to be added. Only
     applicable when editing existing label fields
 -   **allow_deletions** (*True*): whether to allow labels to be deleted. Only

@@ -3,12 +3,13 @@
  */
 
 import { useLookerOptions } from "@fiftyone/state";
-import { useAtom } from "jotai";
+import { useAtomValue, useSetAtom } from "jotai";
 import { useEffect, useRef } from "react";
 import {
   PixiRenderer2D,
   Scene2D,
   globalPixiResourceLoader,
+  lighterInitErrorAtom,
   lighterSceneAtom,
   useLighterEventBus,
   UNDEFINED_LIGHTER_SCENE_ID,
@@ -32,13 +33,18 @@ export type LighterOptions = Partial<ReturnType<typeof useLookerOptions>>;
 export const useLighterSetupWithPixi = (
   stableCanvas: HTMLCanvasElement,
   options: LighterOptions,
-  sceneId: string
+  sceneId: string,
 ) => {
-  const [scene, setScene] = useAtom(lighterSceneAtom);
-  const eventChannel = scene?.getEventChannel() ?? UNDEFINED_LIGHTER_SCENE_ID;
-  const eventBus = useLighterEventBus(eventChannel);
+  // Read and write split rather than `useAtom`: the tuple overload does not
+  // resolve against this atom's type, which left the setter untyped.
+  const scene = useAtomValue(lighterSceneAtom);
+  const setScene = useSetAtom(lighterSceneAtom);
+  const setInitError = useSetAtom(lighterInitErrorAtom);
 
   const rendererRef = useRef<PixiRenderer2D | null>(null);
+
+  const eventChannel = scene?.getEventChannel() ?? UNDEFINED_LIGHTER_SCENE_ID;
+  const eventBus = useLighterEventBus(eventChannel);
 
   useEffect(() => {
     if (!stableCanvas || !sceneId) return;
@@ -46,11 +52,11 @@ export const useLighterSetupWithPixi = (
     const renderer = new PixiRenderer2D(stableCanvas);
     rendererRef.current = renderer;
 
-    // Extract only the options we need for Scene2D
     const sceneOptions = {
       activePaths: options.activePaths,
       showOverlays: options.showOverlays,
       alpha: options.alpha,
+      filter: options.filter,
     };
 
     const newScene = new Scene2D({
@@ -70,14 +76,32 @@ export const useLighterSetupWithPixi = (
   useEffect(() => {
     if (!scene || scene.isDestroyed) return;
 
-    rendererRef.current?.initializePixiJS().then(() => {
-      scene.startRenderLoop();
-    });
+    setInitError(null);
+
+    rendererRef.current
+      ?.initializePixiJS()
+      .then(() => {
+        scene.startRenderLoop();
+        eventBus.dispatch("lighter:renderer-ready", {});
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof Error ? err.message : "An unknown error occurred";
+        console.error("[Lighter] Pixi initialization failed:", err);
+        setInitError(message);
+      });
 
     return () => {
       scene.destroy();
+      // Clear the published scene too. `useLighter` reads this atom, so leaving
+      // a destroyed scene in it hands every consumer (toolbar zoom/fit, the
+      // engine bridge) a dead handle. Guarded so a remount that has already
+      // published its replacement is not clobbered: on a `sceneId` change this
+      // cleanup runs in the commit AFTER the new scene was set, and it closes
+      // over the old one.
+      setScene((current) => (current === scene ? null : current));
     };
-  }, [scene]);
+  }, [scene, setScene]);
 
   useEffect(() => {
     if (scene && !scene.isDestroyed) {
@@ -85,6 +109,7 @@ export const useLighterSetupWithPixi = (
         activePaths: options.activePaths,
         showOverlays: options.showOverlays,
         alpha: options.alpha,
+        filter: options.filter,
       });
     }
   }, [scene, options, eventBus]);

@@ -6,6 +6,7 @@ FiftyOne Server shutdown tests.
 |
 """
 
+import importlib.util
 import json
 import os
 import signal
@@ -16,7 +17,10 @@ import time
 
 import pytest
 
-import fiftyone.server.main as fosm
+# Locate the server entrypoint without importing it: importing
+# fiftyone.server.main sets FIFTYONE_SERVER=1 for the whole test process,
+# which e.g. stops datasets from updating last_loaded_at in other tests
+_SERVER_MAIN = importlib.util.find_spec("fiftyone.server.main").origin
 
 
 def _free_port():
@@ -46,7 +50,14 @@ def test_sigterm_exits_while_an_events_stream_is_open():
     # server alive forever and session.close() hung in os.waitpid().
     port = _free_port()
     proc = subprocess.Popen(
-        [sys.executable, fosm.__file__, "--port", str(port), "--address", "127.0.0.1"],
+        [
+            sys.executable,
+            _SERVER_MAIN,
+            "--port",
+            str(port),
+            "--address",
+            "127.0.0.1",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env={**os.environ, "FIFTYONE_DISABLE_SERVICES": "1"},
@@ -55,7 +66,11 @@ def test_sigterm_exits_while_an_events_stream_is_open():
     try:
         _wait_listening(port, proc)
         body = json.dumps(
-            {"subscription": "shutdown-test", "events": ["state_update"], "initializer": None}
+            {
+                "subscription": "shutdown-test",
+                "events": ["state_update"],
+                "initializer": None,
+            }
         ).encode()
         stream = socket.create_connection(("127.0.0.1", port))
         stream.sendall(
@@ -71,7 +86,9 @@ def test_sigterm_exits_while_an_events_stream_is_open():
         try:
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            pytest.fail("server still alive 15 s after SIGTERM with an open events stream")
+            pytest.fail(
+                "server still alive 15 s after SIGTERM with an open events stream"
+            )
     finally:
         if stream is not None:
             stream.close()

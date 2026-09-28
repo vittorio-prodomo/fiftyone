@@ -22,9 +22,9 @@ TypeScript vanilla DOM (Looker controls)
 
 **Files:**
 
--   Modify: `fiftyone/server/routes/media.py` (add `MediaDownload` class after
-    `Media` class, ~line 156)
--   Modify: `fiftyone/server/routes/__init__.py` (register route and import)
+- Modify: `fiftyone/server/routes/media.py` (add `MediaDownload` class after
+  `Media` class, ~line 156)
+- Modify: `fiftyone/server/routes/__init__.py` (register route and import)
 
 **Step 1: Write the endpoint**
 
@@ -106,9 +106,9 @@ git commit -m "feat: add /media/download endpoint with Content-Disposition attac
 
 **Files:**
 
--   Create: `app/packages/core/src/components/Modal/Actions/Download/index.tsx`
--   Modify: `app/packages/core/src/components/Modal/Actions/index.tsx` (import
-    and render)
+- Create: `app/packages/core/src/components/Modal/Actions/Download/index.tsx`
+- Modify: `app/packages/core/src/components/Modal/Actions/index.tsx` (import
+  and render)
 
 **Step 1: Create the Download component**
 
@@ -212,13 +212,13 @@ git commit -m "feat: add download button to modal action bar"
 
 **Files:**
 
--   Modify: `app/packages/looker/src/icons/index.ts` (add download SVG icon)
--   Modify: `app/packages/looker/src/elements/common/controls.ts` (add
-    `DownloadButtonElement` class)
--   Modify: `app/packages/looker/src/elements/common/actions.ts` (add
-    `download` Control)
--   Modify: `app/packages/looker/src/elements/index.ts` (add
-    `DownloadButtonElement` to image, frame, video, imavid element trees)
+- Modify: `app/packages/looker/src/icons/index.ts` (add download SVG icon)
+- Modify: `app/packages/looker/src/elements/common/controls.ts` (add
+  `DownloadButtonElement` class)
+- Modify: `app/packages/looker/src/elements/common/actions.ts` (add `download`
+  Control)
+- Modify: `app/packages/looker/src/elements/index.ts` (add
+  `DownloadButtonElement` to image, frame, video, imavid element trees)
 
 **Step 1: Add download SVG icon**
 
@@ -227,7 +227,7 @@ In `app/packages/looker/src/icons/index.ts`, add after the `json` export (~line
 
 ```typescript
 export const download = HTMLToDom(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="var(--fo-palette-text-secondary)"><path d="M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" /></svg>'
+    '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="var(--fo-palette-text-secondary)"><path d="M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" /></svg>',
 );
 ```
 
@@ -311,7 +311,7 @@ Add the class after `JSONButtonElement` (~line 344):
 
 ```typescript
 export class DownloadButtonElement<
-    State extends BaseState
+    State extends BaseState,
 > extends BaseElement<State> {
     private spinning = false;
     private timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -427,7 +427,7 @@ git commit -m "feat: add download button to looker bottom controls bar"
 
 **Files:**
 
--   Already handled by Task 3 (the `downloadMedia` Control has `shortcut: "d"`)
+- Already handled by Task 3 (the `downloadMedia` Control has `shortcut: "d"`)
 
 The `downloadMedia` control registered in `COMMON` with `shortcut: "d"` means
 pressing "d" while the looker is focused will dispatch the `"download"` event.

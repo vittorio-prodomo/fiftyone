@@ -55,6 +55,29 @@ from .core.expressions import (
     ViewExpression,
     VALUE,
 )
+from .core.annotation.attributes import (
+    AttributeSpec,
+    When,
+    WhenAnd,
+    WhenCondition,
+    WhenEquals,
+    WhenIn,
+    WhenOperator,
+    WhenOr,
+)
+from .core.annotation.nodes import (
+    Node,
+)
+from .core.ontology import (
+    AnnotationOntology,
+    Taxonomy,
+    apply_ontology,
+    delete_ontology,
+    list_ontologies,
+    load_ontology,
+    ontology_exists,
+    save_ontology,
+)
 from .core.fields import (
     flatten_schema,
     ArrayField,
@@ -180,6 +203,24 @@ from .core.runs import (
     RunResults,
 )
 from .core.sample import Sample
+from .core.media_reference import MediaReference
+from .multimodal.media_reference import (
+    InvalidMediaLocationError,
+    MalformedMediaSourceError,
+    MediaAsset,
+    MediaAssetRole,
+    MediaAssetSelector,
+    MediaReferenceError,
+    MediaSourceAuthorizationError,
+    MissingMediaRootError,
+    MovedMediaRootError,
+    RowInterval,
+    StaleMediaReferenceError,
+    UnfinalizedMediaSourceError,
+    UnsupportedMediaReferenceOperation,
+    VideoTimestampInterval,
+    WholeFile,
+)
 from .core.threed import (
     BoxGeometry,
     CylinderGeometry,
@@ -187,9 +228,11 @@ from .core.threed import (
     SphereGeometry,
     FbxMesh,
     GltfMesh,
+    MirisStream,
     ObjMesh,
     PlyMesh,
     StlMesh,
+    GaussianSplat,
     PerspectiveCamera,
     PointLight,
     DirectionalLight,
@@ -287,3 +330,9 @@ from .utils.eval.segmentation import (
     SegmentationResults,
 )
 from .utils.quickstart import quickstart
+
+from .utils.lerobot import (
+    LeRobotEpisodeReference,
+    UnsupportedLeRobotExportModeError,
+    UnsupportedLeRobotVersionError,
+)

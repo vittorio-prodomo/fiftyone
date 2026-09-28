@@ -6,9 +6,34 @@ FiftyOne operators.
 |
 """
 
-from .types import PromptView
+from typing import Optional, Union
+from .types import PromptView, Property, RiskLevel, ViewTargetProperty
 
 BUILTIN_OPERATOR_PREFIX = "@voxel51/operators"
+
+
+def _normalize_risk_level(
+    risk_level: Union[str, RiskLevel, None],
+) -> RiskLevel:
+    if risk_level is None:
+        return RiskLevel.DANGEROUS
+
+    if isinstance(risk_level, str):
+        try:
+            return RiskLevel[risk_level.upper()]
+        except KeyError as err:
+            raise ValueError(
+                "Invalid risk level '%s'. Valid values are: %s"
+                % (risk_level, [r.value for r in RiskLevel])
+            ) from err
+
+    if not isinstance(risk_level, RiskLevel):
+        raise ValueError(
+            "Invalid risk level '%s'. Must be a string or RiskLevel enum."
+            % risk_level
+        )
+
+    return risk_level
 
 
 class OperatorConfig(object):
@@ -46,6 +71,10 @@ class OperatorConfig(object):
         allow_distributed_execution (False): whether the operator supports
             distributing delegated execution across parallel workers.
         rerunnable (True): whether the operator can be re-run
+        risk_level (RiskLevel.DANGEROUS): the declared :class:`RiskLevel` for
+            this operator is mainly used by guardrail systems of an agent to
+            classify tool calls. If ``None``, the operator defaults to
+            :attr:`RiskLevel.DANGEROUS`
     """
 
     def __init__(
@@ -69,6 +98,8 @@ class OperatorConfig(object):
         resolve_execution_options_on_change=None,
         allow_distributed_execution=False,  # Enterprise only
         rerunnable=True,
+        risk_level=RiskLevel.DANGEROUS,
+        view_target=True,
         **kwargs
     ):
         self.name = name
@@ -89,6 +120,8 @@ class OperatorConfig(object):
         self.default_choice_to_delegated = default_choice_to_delegated
         self.allow_distributed_execution = False  # Enterprise only
         self.rerunnable = rerunnable
+        self.view_target = view_target
+        self._risk_level = _normalize_risk_level(risk_level)
         if resolve_execution_options_on_change is None:
             self.resolve_execution_options_on_change = dynamic
         else:
@@ -96,6 +129,11 @@ class OperatorConfig(object):
                 resolve_execution_options_on_change
             )
         self.kwargs = kwargs  # unused, placeholder for future extensibility
+
+    @property
+    def risk_level(self):
+        """The declared :class:`RiskLevel` for this operator."""
+        return self._risk_level
 
     def to_json(self):
         return {
@@ -118,6 +156,7 @@ class OperatorConfig(object):
             "default_choice_to_delegated": self.default_choice_to_delegated,
             "resolve_execution_options_on_change": self.resolve_execution_options_on_change,
             "allow_distributed_execution": self.allow_distributed_execution,
+            "risk_level": self.risk_level.value,
         }
 
 
@@ -159,7 +198,13 @@ class Operator(object):
         """The :class:`OperatorConfig` for the operator."""
         raise NotImplementedError("subclass must implement config")
 
-    def resolve_delegation(self, ctx):
+    @property
+    def risk_level(self):
+        """The effective risk level of the operator, which is used by guardrail
+        systems of an agent to classify tool calls."""
+        return self.config.risk_level
+
+    def resolve_delegation(self, ctx) -> Optional[bool]:
         """Returns the resolved *forced* delegation flag.
 
         Subclasses can implement this method to decide if delegated execution
@@ -233,14 +278,17 @@ class Operator(object):
             a :class:`fiftyone.operators.types.Property`, or None
         """
         if type == "inputs":
-            # pylint: disable=assignment-from-none
-            input_property = self.resolve_input(ctx)
-            if input_property and input_property.view is None:
-                should_delegate = self.resolve_delegation(ctx)
-                if should_delegate:
-                    input_property.view = PromptView(
-                        submit_button_label="Schedule"
-                    )
+            input_property = self._ensure_view_target(
+                ctx, self.resolve_input(ctx)
+            )
+            if (
+                input_property
+                and input_property.view is None
+                and self.resolve_delegation(ctx)
+            ):
+                input_property.view = PromptView(
+                    submit_button_label="Schedule"
+                )
             return input_property
 
         if type == "outputs":
@@ -248,7 +296,55 @@ class Operator(object):
 
         raise ValueError("Invalid type '%s'" % type)
 
-    def resolve_input(self, ctx):
+    def _ensure_view_target(self, ctx, input_property) -> Optional[Property]:
+        """Adds the system view target input to the operator's form and
+        returns the form.
+
+        The view target is a system concern: a form whose operator resolves
+        a target offers it automatically, its choice is recorded on the run
+        document as the ``view_target`` parameter, and
+        :meth:`ctx.target_view() <fiftyone.operators.executor.ExecutionContext.target_view>`
+        resolves it. An operator that declares its own
+        :meth:`view_target <fiftyone.operators.types.Object.view_target>`
+        property customizes the system input rather than adding a second one,
+        and ``OperatorConfig(view_target=False)`` omits it entirely.
+        """
+        # cheap flag first: ``self.config`` constructs a fresh config
+        if input_property is None or not ctx._view_target_resolved:
+            return input_property
+
+        if not self.config.view_target:
+            return input_property
+
+        # a form is conventionally an ``Object``, but ``resolve_input`` may
+        # return any property; only object forms can carry the input
+        properties = getattr(
+            getattr(input_property, "type", None), "properties", None
+        )
+        if properties is None:
+            return input_property
+
+        if any(
+            isinstance(prop, ViewTargetProperty)
+            for prop in properties.values()
+        ):
+            return input_property
+
+        # the target choice leads the form, since the rest of a form
+        # typically describes what to do to the targeted samples. Resolving
+        # ctx.target_view(require_flat=True) during resolve_input stamps the
+        # flatness requirement the input must reflect
+        input_property.type.properties = {
+            "view_target": ViewTargetProperty(
+                ctx,
+                require_flat=ctx._view_target_require_flat,
+            ),
+            **properties,
+        }
+
+        return input_property
+
+    def resolve_input(self, ctx) -> Optional[Property]:
         """Returns the resolved input property.
 
         Subclasses can implement this method to define the inputs to the

@@ -1,0 +1,225 @@
+/**
+ * Copyright 2017-2026, Voxel51, Inc.
+ *
+ * Create round-trip for non-box labels on the video surface: drawing a polyline
+ * and painting an instance mask each add a track, open the edit form, commit on
+ * class assignment, and survive a fresh browser context. Polylines self-create
+ * through `usePolylineModeInstaller` and an unselected brush stroke opens a
+ * fresh masked detection via `lighter:overlay-create`.
+ */
+import { Browser, test as base, type Page } from "src/oss/fixtures";
+import { ModalPom } from "src/oss/poms/modal";
+import { getUniqueDatasetNameWithPrefix } from "src/oss/utils";
+import { EventUtils } from "src/shared/event-utils";
+import type { AbstractFiftyoneLoader } from "src/shared/abstract-loader";
+
+const datasetName = getUniqueDatasetNameWithPrefix(
+  "annotate-video-label-types-create",
+);
+
+/** Fixed ObjectId addressing the first sample (so we can deep-link the modal). */
+const id = "000000000000000000000000";
+
+const test = base.extend<{ modal: ModalPom }>({
+  modal: async ({ page, eventUtils }, use) => {
+    await use(new ModalPom(page, eventUtils));
+  },
+});
+
+test.beforeAll(async ({ foWebServer }) => {
+  await foWebServer.startWebServer();
+});
+
+test.afterAll(async ({ foWebServer }) => {
+  await foWebServer.stopWebServer();
+});
+
+/** Open the modal in annotate mode on the deep-linked video sample. */
+const openAnnotate = async (
+  fiftyoneLoader: AbstractFiftyoneLoader,
+  modal: ModalPom,
+  page: Page,
+) => {
+  await fiftyoneLoader.waitUntilGridVisible(page, datasetName, {
+    searchParams: new URLSearchParams({ id }),
+  });
+  await modal.assert.isOpen();
+  await modal.sidebar.switchMode("annotate");
+  await modal.videoAnnotate.waitForSurface();
+};
+
+/** Verify persisted state from a brand-new browser context (true round-trip). */
+const inFreshContext = async (
+  browser: Browser,
+  fiftyoneLoader: AbstractFiftyoneLoader,
+  verify: (modal: ModalPom) => Promise<void>,
+) => {
+  const context = await browser.newContext();
+  const freshPage = await context.newPage();
+  try {
+    const freshModal = new ModalPom(freshPage, new EventUtils(freshPage));
+    await openAnnotate(fiftyoneLoader, freshModal, freshPage);
+    await verify(freshModal);
+  } finally {
+    await context.close();
+  }
+};
+
+/** A sample-mutating autosave (the engine commit that persists the draw). */
+const savedSample = (page: Page) =>
+  page.waitForResponse(
+    (r) =>
+      /\/sample\//.test(r.url()) &&
+      ["POST", "PATCH", "PUT"].includes(r.request().method()),
+  );
+
+test.describe.serial("video non-box label create", () => {
+  // Re-seed a clean slate per test (polylines field + schema active, no tracks):
+  // these run serially against one dataset, so a persisted draw from one test
+  // would otherwise leave a stray track that the next test's count picks up.
+  test.beforeEach(async ({ datasetFactory }) => {
+    await datasetFactory.createDataset({
+      mediaType: "video",
+      datasetName,
+      sampleFrames: true,
+      schema: {
+        "frames.detections": "Detections",
+        "frames.detections.detections.instance": "Instance",
+        "frames.detections.detections.keyframe": "BooleanField",
+        "frames.detections.detections.propagation": "DictField",
+        "frames.polylines": "Polylines",
+        "frames.polylines.polylines.instance": "Instance",
+        "frames.polylines.polylines.keyframe": "BooleanField",
+        "frames.polylines.polylines.propagation": "DictField",
+        events: "TemporalDetections",
+      },
+      labelSchemas: {
+        "frames.detections": {
+          type: "detections",
+          component: "dropdown",
+          classes: ["vehicle", "person", "road sign"],
+          attributes: [
+            { name: "id", type: "id", component: "text", read_only: true },
+            { name: "tags", type: "list<str>", component: "text" },
+            { name: "confidence", type: "float", component: "text" },
+            { name: "index", type: "int", component: "text" },
+            { name: "mask_path", type: "str", component: "text" },
+          ],
+        },
+        "frames.polylines": {
+          type: "polylines",
+          component: "dropdown",
+          classes: ["vehicle", "person", "road sign"],
+          attributes: [
+            { name: "id", type: "id", component: "text", read_only: true },
+            { name: "index", type: "int", component: "text" },
+          ],
+        },
+        events: {
+          type: "temporaldetections",
+          component: "dropdown",
+          classes: ["approach", "pass", "depart"],
+          attributes: [
+            { name: "id", type: "id", component: "text", read_only: true },
+          ],
+        },
+      },
+      // three events split the clip into thirds
+      withSampleData: ({ numFrames }, { label }) => {
+        const a = Math.max(1, Math.floor(numFrames / 3));
+        const b = Math.max(a + 1, Math.floor((2 * numFrames) / 3));
+        return {
+          events: label.temporalDetections([
+            label.temporalDetection({ label: "approach", support: [1, a] }),
+            label.temporalDetection({ label: "pass", support: [a + 1, b] }),
+            label.temporalDetection({
+              label: "depart",
+              support: [b + 1, numFrames],
+            }),
+          ]),
+        };
+      },
+      // present-but-empty on every frame, so the first draw's patch can append
+      withFrameData: (_, { label }) => ({
+        detections: label.detections([]),
+        polylines: label.polylines([]),
+      }),
+    });
+  });
+
+  test("drawing a polyline adds a track, assigns a class, and persists", async ({
+    browser,
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+
+    // capture the live count first — earlier tests persist, so siblings can't
+    // assume a clean slate.
+    const before = (await modal.videoAnnotate.objectTrackIds()).length;
+
+    await modal.sidebar.annotate.polylineMode();
+    await modal.videoAnnotate.drawPolyline([
+      [0.45, 0.45],
+      [0.6, 0.45],
+      [0.52, 0.6],
+    ]);
+
+    // the draw creates exactly one new object track on the timeline
+    await modal.videoAnnotate.assert.objectTrackCount(before + 1);
+
+    // the freshly-drawn polyline opens its edit form; assigning a class commits
+    const saved = savedSample(page);
+    await modal.sidebar.edit.selectFieldChoice("label", "person");
+    await modal.sidebar.edit.assert.verifyFieldValue("label", "person");
+    await saved;
+
+    // the polyline frame label survives a true round-trip — exactly one object
+    // track persists on the clean-slate timeline (the class is verified live
+    // above; a single-frame polyline isn't reliably playhead-listed on reload).
+    await inFreshContext(browser, fiftyoneLoader, async (freshModal) => {
+      await freshModal.videoAnnotate.assert.objectTrackCount(before + 1);
+    });
+  });
+
+  test("painting a mask adds a track, assigns a class, and persists", async ({
+    browser,
+    fiftyoneLoader,
+    modal,
+    page,
+  }) => {
+    await openAnnotate(fiftyoneLoader, modal, page);
+
+    const before = (await modal.videoAnnotate.objectTrackIds()).length;
+
+    await modal.sidebar.annotate.segmentationMode();
+    await modal.sidebar.edit.selectBrushTool();
+    await modal.videoAnnotate.paintMaskStroke([
+      [0.4, 0.4],
+      [0.48, 0.48],
+      [0.56, 0.56],
+    ]);
+
+    // the paint creates exactly one new masked-detection track
+    await modal.videoAnnotate.assert.objectTrackCount(before + 1);
+
+    // the new detection carries a mask, and assigning a class commits it
+    await modal.sidebar.edit.assert.hasMask(true);
+    // the sidebar mask preview renders — proving the open form resolved the
+    // live masked overlay by the track's instance id, not a maskless stub
+    await modal.sidebar.edit.assert.hasMaskPreview(true);
+    const saved = savedSample(page);
+    await modal.sidebar.edit.selectFieldChoice("label", "person");
+    await modal.sidebar.edit.assert.verifyFieldValue("label", "person");
+    await saved;
+
+    // the masked detection survives a true round-trip with its mask intact
+    await inFreshContext(browser, fiftyoneLoader, async (freshModal) => {
+      await freshModal.videoAnnotate.assert.objectTrackCount(before + 1);
+      await freshModal.videoAnnotate.selectLabel("person");
+      await freshModal.sidebar.edit.assert.hasMask(true);
+      await freshModal.sidebar.edit.assert.hasMaskPreview(true);
+    });
+  });
+});

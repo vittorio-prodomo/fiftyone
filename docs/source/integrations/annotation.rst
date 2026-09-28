@@ -5,6 +5,10 @@ Annotating Datasets
 
 .. default-role:: code
 
+.. customavailablein::
+    :oss_version: 0.13.0
+    :enterprise_version: 1.0
+
 FiftyOne provides a powerful annotation API that makes it easy to add or edit
 labels on your :ref:`datasets <using-datasets>` or specific
 :ref:`views <using-views>` into them.
@@ -509,12 +513,13 @@ more details:
     If a `label_schema` is also provided, this parameter determines which
     attributes are included for all fields that do not explicitly define their
     per-field attributes (in addition to any per-class attributes)
--   **mask_targets** (*None*): a dict mapping pixel values to semantic label
-    strings. Only applicable when annotating semantic segmentations. All new
-    label fields must have mask targets provided via one of the supported
-    methods. For existing label fields, if mask targets are not provided by
-    this argument nor `label_schema`, any applicable mask targets stored on
-    your dataset will be used, if available
+-   **mask_targets** (*None*): a dict mapping pixel values (2D masks) or RGB
+    hex strings (3D masks) to semantic label strings. Only applicable when
+    annotating semantic segmentations. All new label fields must have mask
+    targets provided via one of the supported methods. For existing label
+    fields, if mask targets are not provided by this argument nor
+    `label_schema`, any applicable mask targets stored on your dataset will be
+    used, if available
 -   **allow_additions** (*True*): whether to allow new labels to be added. Only
     applicable when editing existing label fields
 -   **allow_deletions** (*True*): whether to allow labels to be deleted. Only
@@ -542,6 +547,10 @@ for more details.
 
 Label schema
 ------------
+
+.. customavailablein::
+    :oss_version: 0.14.0
+    :enterprise_version: 1.0
 
 The `label_schema`, `label_field`, `label_type`, `classes`, `attributes`, and
 `mask_targets` parameters to
@@ -757,6 +766,10 @@ types like lists, dictionaries, and arrays will be omitted.
 Restricting additions, deletions, and edits
 -------------------------------------------
 
+.. customavailablein::
+    :oss_version: 0.14.0
+    :enterprise_version: 1.0
+
 When you create annotation runs that involve editing existing label fields, you
 can optionally specify that certain changes are not allowed by passing the
 following flags to
@@ -856,6 +869,10 @@ for this as follows:
 
 Labeling videos
 ---------------
+
+.. customavailablein::
+    :oss_version: 0.14.0
+    :enterprise_version: 1.0
 
 When annotating spatiotemporal objects in videos, you have a few additional
 options at your fingertips.
@@ -1072,7 +1089,7 @@ three classes with the appropriate abstract methods implemented:
 .. note::
 
     Refer to the
-    `fiftyone.utils.cvat <https://github.com/voxel51/fiftyone/blob/develop/fiftyone/utils/cvat.py>`_
+    `fiftyone.utils.cvat <https://github.com/voxel51/fiftyone/blob/main/fiftyone/utils/cvat.py>`_
     module for an example of how the above subclasses are implemented for the
     CVAT backend.
 
@@ -1080,14 +1097,14 @@ The recommended way to expose a custom backend is to add it to your
 :ref:`annotation config <annotation-config>` at
 `~/.fiftyone/annotation_config.json` as follows:
 
-.. code-block:: text
+.. code-block:: json
 
     {
         "default_backend": "<backend>",
         "backends": {
             "<backend>": {
                 "config_cls": "your.custom.AnnotationConfig",
-                # custom parameters here
+                "<parameter>": "<value>"
             }
         }
     }

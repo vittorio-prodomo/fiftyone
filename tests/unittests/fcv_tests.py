@@ -44,7 +44,7 @@ class TestUpdateFCV(unittest.TestCase):
 
         for server_version, fc_version in test_cases:
             with self.subTest(
-                server_version=server_version, fc_version=fc_version
+                server_version=str(server_version), fc_version=str(fc_version)
             ), patch("pymongo.MongoClient") as mock_client, patch(
                 "fiftyone.core.odm.database.logger"
             ) as mock_logger:
@@ -66,7 +66,7 @@ class TestUpdateFCV(unittest.TestCase):
                     Version(f"{server_version.major}.0")
                 )
                 mock_admin.command.assert_any_call(expected_call)
-                
+
                 mock_logger.warning.assert_any_call(
                     "Your MongoDB server version is newer than your feature "
                     "compatibility version. "
