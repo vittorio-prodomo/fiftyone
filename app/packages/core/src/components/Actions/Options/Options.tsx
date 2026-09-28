@@ -4,9 +4,9 @@ import {
   TabOption,
   useTheme,
 } from "@fiftyone/components";
-import { Slider } from "@mui/material";
 import * as fos from "@fiftyone/state";
 import { groupStatistics } from "@fiftyone/state";
+import { SingleValueSlider } from "@voxel51/voodo";
 import { useAtomValue } from "jotai";
 import type { RefObject } from "react";
 import { default as React, useMemo } from "react";
@@ -86,32 +86,24 @@ const Patches = ({ modal }: { modal: boolean }) => {
 };
 
 const ZoomPad = ({ modal }: { modal: boolean }) => {
-  const isPatches = useRecoilValue(fos.isPatchesView);
-  const crop = useRecoilValue(fos.cropToContent(modal));
-  const [zoomPad, setZoomPad] = useRecoilState(fos.zoomPad(modal));
-  const theme = useTheme();
+  const zoomPad = fos.useZoomPad(modal);
+  const setZoomPad = fos.useSetZoomPad(modal);
 
-  if (!isPatches || !crop) {
+  if (zoomPad === null) {
     return null;
   }
 
   return (
     <>
       <PopoutSectionTitle>Zoom padding</PopoutSectionTitle>
-      <Slider
+      <SingleValueSlider
         value={zoomPad}
-        onChange={(_e: Event, value: number | number[]) =>
-          setZoomPad(value as number)
-        }
+        onChange={setZoomPad}
         min={0}
         max={0.5}
         step={0.05}
-        valueLabelDisplay="auto"
-        valueLabelFormat={(v: number) => v.toFixed(2)}
-        sx={{
-          color: theme.primary.main,
-          margin: "0 0.5rem",
-        }}
+        knobLabel
+        aria-label="Zoom padding"
       />
     </>
   );

@@ -1,7 +1,12 @@
 import { is3d, MEDIA_TYPE_IMAGE, type Schema } from "@fiftyone/utilities";
 import { useMemo } from "react";
-import { useRecoilCallback, useRecoilState, useRecoilValue } from "recoil";
-import { selectedSamples } from "../recoil/atoms";
+import {
+  useRecoilCallback,
+  useRecoilState,
+  useRecoilValue,
+  useSetRecoilState,
+} from "recoil";
+import { cropToContent, selectedSamples, zoomPad } from "../recoil/atoms";
 import { groupSlice } from "../recoil/groups";
 import {
   anyTagging,
@@ -274,6 +279,23 @@ export const useDynamicGroupGroupBy = (): string | null => {
 
 /** Whether the current view is a patches view. */
 export const useIsPatchesView = (): boolean => useRecoilValue(isPatchesView);
+
+/**
+ * How much context patches show around their region when cropped to it, as
+ * a fraction of the region's size. Null when it does not apply: outside
+ * patches views, or when patches are not cropped.
+ */
+export const useZoomPad = (modal: boolean): number | null => {
+  const isPatches = useRecoilValue(isPatchesView);
+  const crop = useRecoilValue(cropToContent(modal));
+  const pad = useRecoilValue(zoomPad(modal));
+
+  return isPatches && crop ? pad : null;
+};
+
+/** Sets how much context patches show around their region. */
+export const useSetZoomPad = (modal: boolean): ((pad: number) => void) =>
+  useSetRecoilState(zoomPad(modal));
 
 /** The server's stage descriptors, as `fiftyone/core/stages.py` describes them. */
 export const useStageDefinitions = () => useRecoilValue(stageDefinitions);

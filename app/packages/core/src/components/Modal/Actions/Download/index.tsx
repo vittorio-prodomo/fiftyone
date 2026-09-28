@@ -1,30 +1,25 @@
 import { PillButton } from "@fiftyone/components";
 import {
   getSampleSrc,
-  getNormalizedUrls,
-  modalSample,
-  selectedMediaField,
+  useModalMediaPath,
+  useModalSample,
 } from "@fiftyone/state";
-import { Download as DownloadIcon } from "@mui/icons-material";
-import { CircularProgress } from "@mui/material";
+import { Icon, IconName, Size, Spinner } from "@voxel51/voodo";
 import { useCallback, useState } from "react";
-import { useRecoilValue } from "recoil";
 
 const Download = () => {
   const [downloading, setDownloading] = useState(false);
-  const { sample, urls: rawUrls } = useRecoilValue(modalSample);
-  const mediaField = useRecoilValue(selectedMediaField(true));
+  const sample = useModalSample();
+  const mediaPath = useModalMediaPath();
 
   const handleDownload = useCallback(() => {
     if (downloading) return;
 
-    const urls = getNormalizedUrls(rawUrls);
-    const rawUrl =
-      urls?.[mediaField] ?? urls?.filepath ?? (sample?.filepath as string);
+    const rawUrl = mediaPath ?? (sample?.sample?.filepath as string);
     if (!rawUrl) return;
 
     // getSampleSrc builds "/media?filepath=..." — swap to "/media/download"
-    const mediaSrc = getSampleSrc(rawUrl as string);
+    const mediaSrc = getSampleSrc(rawUrl);
     const downloadSrc = mediaSrc.replace("/media?", "/media/download?");
 
     const a = document.createElement("a");
@@ -36,15 +31,17 @@ const Download = () => {
 
     setDownloading(true);
     setTimeout(() => setDownloading(false), 2000);
-  }, [downloading, rawUrls, mediaField, sample]);
+  }, [downloading, mediaPath, sample]);
 
   return (
     <PillButton
       icon={
         downloading ? (
-          <CircularProgress size={16} thickness={6} />
+          <Spinner size={Size.Sm} />
         ) : (
-          <DownloadIcon />
+          // Unlike MUI icons, VOODO icons have no intrinsic size; 18px
+          // matches the neighboring action bar icons
+          <Icon name={IconName.Download} size={18} />
         )
       }
       open={false}
