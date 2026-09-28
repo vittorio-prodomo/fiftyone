@@ -422,7 +422,11 @@ class ViewStage(object):
         """
         view_stage_cls = etau.get_class(d["_cls"])
         kwargs = {
-            name: _decode_expressions(value)
+            # A conversion stage's `_state` is an opaque snapshot of its
+            # serialized inputs, compared as JSON to detect changes. Decoding
+            # expressions inside it would make that comparison evaluate
+            # ViewExpression.__eq__, which builds an expression and raises
+            name: (value if name == "_state" else _decode_expressions(value))
             for name, value in dict(d["kwargs"]).items()
         }
 
