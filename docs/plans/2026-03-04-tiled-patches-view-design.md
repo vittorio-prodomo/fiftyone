@@ -43,9 +43,9 @@ view = dataset.to_tiles(
 
 **Implementation:**
 
--   `ToTiles` ViewStage in `fiftyone/core/stages.py` (wraps `ToPatches`)
--   `to_tiles()` convenience method in `fiftyone/core/collections.py`
--   Tile grid generation helper in `fiftyone/core/patches.py` or new utility
+- `ToTiles` ViewStage in `fiftyone/core/stages.py` (wraps `ToPatches`)
+- `to_tiles()` convenience method in `fiftyone/core/collections.py`
+- Tile grid generation helper in `fiftyone/core/patches.py` or new utility
 
 **Overlap auto-detection:** values >= 1 treated as pixels, values < 1 as
 fraction of tile size.
@@ -66,12 +66,12 @@ maps normalized coordinates to canvas space correctly regardless of zoom/pan.
 
 ## What We Don't Build
 
--   No label clipping/re-normalization — viewport transform handles visual
-    clipping
--   No new overlay rendering code — existing pipeline works
--   No server-side image cropping — client-side canvas scale/pan
--   No new PatchesView subclass — `ToTiles` produces standard `PatchesView`
--   No label sync concerns — labels stay in original coordinates
+- No label clipping/re-normalization — viewport transform handles visual
+  clipping
+- No new overlay rendering code — existing pipeline works
+- No server-side image cropping — client-side canvas scale/pan
+- No new PatchesView subclass — `ToTiles` produces standard `PatchesView`
+- No label sync concerns — labels stay in original coordinates
 
 ## Files to Modify
 
