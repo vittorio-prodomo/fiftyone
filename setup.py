@@ -81,6 +81,9 @@ setup(
         "sse-starlette>=0.10.3,<4",
         "starlette>=1.3.1,<1.4",
         "strawberry-graphql>=0.315.7,<0.317.0",
+        # strawberry 0.316 allows graphql-core<3.4 but imports
+        # graphql.execution.ExecutionContext, which 3.3.0 removed
+        "graphql-core>=3.2,<3.3",
         "tabulate>=0.7,<0.11",
         "tqdm>=2,<5",
         "xmltodict>=1,<2",
