@@ -16,6 +16,7 @@ import unittest
 import fiftyone as fo
 import fiftyone.core.stages as fos
 import fiftyone.core.tiles as fot
+from fiftyone import ViewField as F
 
 from decorators import drop_datasets
 
@@ -421,6 +422,272 @@ class TilesLabelFilterTests(unittest.TestCase):
         values = view.values("gt")
         self.assertEqual(values[:2], [None, None])
         self.assertEqual([len(v.detections) for v in values[2:]], [0, 0])
+
+
+def _reference_counts(sizes, boxes_px, tile_size, overlap):
+    """Counts the boxes that no tile contains by checking every tile."""
+    count = uncontained = too_large = 0
+    for (img_w, img_h), boxes in zip(sizes, boxes_px):
+        tiles = fot.compute_tiles(img_w, img_h, tile_size, overlap)
+        tile_w, tile_h = tiles[0]["width"], tiles[0]["height"]
+        for x, y, w, h in boxes:
+            # only the part inside the image counts
+            x1, x2 = min(max(x, 0), img_w), min(max(x + w, 0), img_w)
+            y1, y2 = min(max(y, 0), img_h), min(max(y + h, 0), img_h)
+            count += 1
+            if any(
+                t["x"] <= x1
+                and x2 <= t["x"] + tile_w
+                and t["y"] <= y1
+                and y2 <= t["y"] + tile_h
+                for t in tiles
+            ):
+                continue
+
+            uncontained += 1
+            if x2 - x1 > tile_w or y2 - y1 > tile_h:
+                too_large += 1
+
+    return {"count": count, "uncontained": uncontained, "too_large": too_large}
+
+
+def _detections(img_w, img_h, boxes_px):
+    return fo.Detections(
+        detections=[
+            fo.Detection(
+                label="obj",
+                bounding_box=[x / img_w, y / img_h, w / img_w, h / img_h],
+            )
+            for x, y, w, h in boxes_px
+        ]
+    )
+
+
+class CountUncontainedLabelsTests(unittest.TestCase):
+    """A 1000x500 image cut into 600x500 tiles at x=0 and x=400."""
+
+    def _counts(self, tile_size=(600, 600), overlap=100, **fields):
+        dataset = _make_dataset(
+            [(1000, 500)], **{k: [v] for k, v in fields.items()}
+        )
+        return fot.count_uncontained_labels(
+            dataset, tile_size, overlap=overlap
+        )
+
+    @drop_datasets
+    def test_matches_the_reference(self):
+        rng = random.Random(0)
+        for _ in range(40):
+            tile_size = (rng.randint(20, 300), rng.randint(20, 300))
+            overlap = rng.choice(
+                [0, rng.randint(1, min(tile_size) - 1), rng.random() * 0.9]
+            )
+            sizes = [
+                (rng.randint(10, 800), rng.randint(10, 800)) for _ in range(4)
+            ]
+
+            boxes_px = []
+            for img_w, img_h in sizes:
+                tiles = fot.compute_tiles(img_w, img_h, tile_size, overlap)
+                boxes = []
+                for _ in range(40):
+                    if rng.random() < 0.5:
+                        # snapped to tile edges, where float rounding matters
+                        t = rng.choice(tiles)
+                        x = t["x"] + rng.choice([-1, 0, 0, 1])
+                        y = t["y"] + rng.choice([-1, 0, 0, 1])
+                        w = t["width"] + rng.choice([-1, 0, 0, 1]) - x + t["x"]
+                        h = (
+                            t["height"]
+                            + rng.choice([-1, 0, 0, 1])
+                            - y
+                            + t["y"]
+                        )
+                        w, h = max(w, 0), max(h, 0)
+                    else:
+                        x = rng.randint(-20, img_w)
+                        y = rng.randint(-20, img_h)
+                        w = rng.randint(0, img_w // 2)
+                        h = rng.randint(0, img_h // 2)
+
+                    boxes.append((x, y, w, h))
+
+                boxes_px.append(boxes)
+
+            dataset = _make_dataset(
+                sizes,
+                gt=[
+                    _detections(img_w, img_h, boxes)
+                    for (img_w, img_h), boxes in zip(sizes, boxes_px)
+                ],
+            )
+            counts = fot.count_uncontained_labels(
+                dataset, tile_size, overlap=overlap
+            )
+            self.assertEqual(
+                counts["gt"],
+                _reference_counts(sizes, boxes_px, tile_size, overlap),
+                msg="tile_size=%s, overlap=%s, sizes=%s"
+                % (tile_size, overlap, sizes),
+            )
+            dataset.delete()
+
+    @drop_datasets
+    def test_fits_crosses_and_too_large(self):
+        gt = _detections(
+            1000,
+            500,
+            [
+                (50, 50, 100, 100),  # in the left tile
+                (400, 0, 600, 500),  # exactly the right tile
+                (350, 50, 300, 100),  # crosses both tiles' borders
+                (500, 50, 100, 100),  # in the overlap
+                (100, 50, 700, 100),  # wider than a tile
+            ],
+        )
+        counts = self._counts(gt=gt)
+        self.assertEqual(
+            counts, {"gt": {"count": 5, "uncontained": 2, "too_large": 1}}
+        )
+
+    @drop_datasets
+    def test_labels_no_larger_than_the_overlap_always_fit(self):
+        # 600x500 tiles at x=0 and x=500, which overlap by exactly 100px
+        dataset = _make_dataset(
+            [(1100, 500)],
+            fits=[
+                _detections(
+                    1100, 500, [(x, 50, 100, 100) for x in range(1001)]
+                )
+            ],
+            crosses=[_detections(1100, 500, [(499.5, 50, 101, 100)])],
+        )
+        counts = fot.count_uncontained_labels(dataset, (600, 600), overlap=100)
+        self.assertEqual(counts["fits"]["uncontained"], 0)
+        self.assertEqual(counts["crosses"]["uncontained"], 1)
+
+    @drop_datasets
+    def test_fits_despite_float_rounding(self):
+        # x=1px, w=21px ends at 22px, where the first tile ends, but
+        # 0.001 + 0.021 == 0.022000000000000002 > 0.022
+        gt = fo.Detections(
+            detections=[
+                fo.Detection(label="a", bounding_box=[0.001, 0.1, 0.021, 0.1])
+            ]
+        )
+        counts = self._counts(tile_size=(22, 500), overlap=0, gt=gt)
+        self.assertEqual(counts["gt"]["uncontained"], 0)
+
+    @drop_datasets
+    def test_only_the_part_inside_the_image_counts(self):
+        gt = _detections(
+            1000, 500, [(-100, -50, 200, 100), (950, 450, 100, 100)]
+        )
+        counts = self._counts(gt=gt)
+        self.assertEqual(counts["gt"]["uncontained"], 0)
+
+    @drop_datasets
+    def test_polylines_and_keypoints_use_the_bounds_of_their_points(self):
+        nan = float("nan")
+        counts = self._counts(
+            lines=fo.Polylines(
+                polylines=[
+                    # each shape fits in a tile, but not both
+                    fo.Polyline(
+                        points=[[(0.35, 0.1), (0.38, 0.1)], [(0.65, 0.2)]]
+                    ),
+                    fo.Polyline(points=[[(0.45, 0.1), (0.55, 0.2)]]),
+                ]
+            ),
+            kps=fo.Keypoints(
+                keypoints=[
+                    # the hidden point would put it across both tiles
+                    fo.Keypoint(points=[(0.05, 0.1), (nan, nan), (0.1, 0.2)]),
+                    fo.Keypoint(points=[(0.05, 0.1), (0.9, 0.2)]),
+                    # all points hidden: no box
+                    fo.Keypoint(points=[(nan, nan)]),
+                ]
+            ),
+        )
+        self.assertEqual(
+            counts,
+            {
+                "lines": {"count": 2, "uncontained": 1, "too_large": 0},
+                "kps": {"count": 2, "uncontained": 1, "too_large": 1},
+            },
+        )
+
+    @drop_datasets
+    def test_single_label_fields_and_missing_boxes(self):
+        dataset = _make_dataset(
+            [(1000, 500), (1000, 500), (1000, 500)],
+            det=[
+                fo.Detection(bounding_box=[0.35, 0.1, 0.3, 0.1]),
+                fo.Detection(label="no box"),
+                None,
+            ],
+            gt=[
+                fo.Detections(
+                    detections=[
+                        fo.Detection(bounding_box=[0.05, 0.1, 0.1, 0.1]),
+                        fo.Detection(label="no box"),
+                    ]
+                ),
+                None,
+                fo.Detections(),
+            ],
+        )
+        counts = fot.count_uncontained_labels(dataset, (600, 600), overlap=100)
+        self.assertEqual(
+            counts,
+            {
+                "det": {"count": 1, "uncontained": 1, "too_large": 0},
+                "gt": {"count": 1, "uncontained": 0, "too_large": 0},
+            },
+        )
+
+    @drop_datasets
+    def test_fields(self):
+        dataset = _make_dataset(
+            [(1000, 500)],
+            gt=[_detections(1000, 500, [(350, 50, 300, 100)])],
+            pred=[_detections(1000, 500, [(50, 50, 100, 100)])],
+            cls=[fo.Classification(label="bridge")],
+        )
+
+        # all supported fields by default
+        counts = fot.count_uncontained_labels(dataset, (600, 600), 100)
+        self.assertEqual(list(counts), ["gt", "pred"])
+
+        counts = fot.count_uncontained_labels(
+            dataset, (600, 600), 100, fields="pred"
+        )
+        self.assertEqual(list(counts), ["pred"])
+
+        for fields in ("cls", ["gt", "missing"]):
+            with self.assertRaises(ValueError):
+                fot.count_uncontained_labels(
+                    dataset, (600, 600), 100, fields=fields
+                )
+
+        # the labels of the collection, not of its dataset
+        view = dataset.filter_labels("gt", F("label") == "other")
+        counts = fot.count_uncontained_labels(view, (600, 600), 100)
+        self.assertEqual(counts["gt"]["count"], 0)
+
+        # no supported fields
+        counts = fot.count_uncontained_labels(
+            dataset.exclude_fields(["gt", "pred"]), (600, 600), 100
+        )
+        self.assertEqual(counts, {})
+
+    @drop_datasets
+    def test_missing_metadata_raises(self):
+        dataset = _make_dataset([(1000, 500)])
+        dataset.add_sample(fo.Sample(filepath="/tmp/nometa.jpg"))
+
+        with self.assertRaises(ValueError):
+            fot.count_uncontained_labels(dataset, (600, 600))
 
 
 class TilesSourceSafetyTests(unittest.TestCase):

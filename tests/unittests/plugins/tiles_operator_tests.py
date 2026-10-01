@@ -151,6 +151,58 @@ class PreviewTilingTests(unittest.TestCase):
         self.assertIn("Every image is cut into 2 × 2 tiles", summary)
 
     @drop_datasets
+    def test_summary_of_uncontained_objects(self):
+        # 1000x500 -> 600x500 tiles at x=0 and x=400
+        dataset = _dataset((1000, 500))
+        sample = dataset.first()
+        sample["gt"] = fo.Detections(
+            detections=[
+                fo.Detection(bounding_box=[0.05, 0.1, 0.1, 0.1]),
+                fo.Detection(bounding_box=[0.35, 0.1, 0.3, 0.1]),
+                fo.Detection(bounding_box=[0.1, 0.1, 0.7, 0.1]),
+            ]
+        )
+        sample["pred"] = fo.Detections(
+            detections=[fo.Detection(bounding_box=[0.05, 0.1, 0.1, 0.1])]
+        )
+        sample["empty"] = fo.Detections()
+        sample.save()
+
+        ctx = _ctx(dataset, tile_width=600, tile_height=600, overlap=100)
+        summary = _inputs(ctx)["summary"].default
+        self.assertIn("Objects that no tile fully contains", summary)
+        self.assertIn(
+            "- `gt`: 2 of 3 (66.7%) — 1 larger than a tile, 1 crossing "
+            "tile borders",
+            summary,
+        )
+        self.assertIn("- `pred`: none of 1", summary)
+        self.assertNotIn("empty", summary)
+
+        # images without metadata are left out, as in the rest of the summary
+        dataset.add_sample(
+            fo.Sample(
+                filepath="/tmp/nometa.jpg",
+                gt=fo.Detections(
+                    detections=[
+                        fo.Detection(bounding_box=[0.35, 0.1, 0.3, 0.1])
+                    ]
+                ),
+            )
+        )
+        summary = _inputs(_ctx(dataset, tile_width=600, tile_height=600))[
+            "summary"
+        ].default
+        self.assertIn("- `gt`: 2 of 3", summary)
+
+    @drop_datasets
+    def test_no_uncontained_objects_section_without_labels(self):
+        dataset = _dataset((1000, 500))
+        ctx = _ctx(dataset, tile_width=600, tile_height=600)
+        summary = _inputs(ctx)["summary"].default
+        self.assertNotIn("Objects", summary)
+
+    @drop_datasets
     def test_invalid_params_block_execution(self):
         dataset = _dataset((1000, 500))
         inputs = _inputs(

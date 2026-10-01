@@ -277,11 +277,16 @@ def _count_missing_metadata(view):
     return view.match(~has_size).count()
 
 
+def _with_size(view):
+    """The images of the view whose size is known."""
+    has_size = (F("metadata.width") > 0) & (F("metadata.height") > 0)
+    return view.match(has_size)
+
+
 def _count_image_sizes(view):
     """Counts the images of each ``(width, height)`` in the view."""
-    has_size = (F("metadata.width") > 0) & (F("metadata.height") > 0)
     key = F("metadata.width") * _SIZE_KEY + F("metadata.height")
-    counts = view.match(has_size).count_values(key)
+    counts = _with_size(view).count_values(key)
 
     sizes = Counter()
     for key, count in counts.items():
@@ -341,7 +346,67 @@ def _summarize_tiling(view, tile_size, overlap):
             % "{:,}".format(num_clamped)
         )
 
+    lines.extend(_summarize_uncontained_labels(view, tile_size, overlap))
+
     return "\n\n".join(lines)
+
+
+def _summarize_uncontained_labels(view, tile_size, overlap):
+    """Markdown lines on the objects that no tile would fully contain, which
+    shows whether the tiles or their overlap are too small for the objects.
+    """
+    counts = fot.count_uncontained_labels(
+        _with_size(view), tile_size, overlap=overlap
+    )
+
+    items = []
+    for field, c in counts.items():
+        if not c["count"]:
+            continue
+
+        if not c["uncontained"]:
+            items.append(
+                "- `%s`: none of %s" % (field, "{:,}".format(c["count"]))
+            )
+            continue
+
+        too_large = c["too_large"]
+        crossing = c["uncontained"] - too_large
+        reasons = []
+        if too_large:
+            reasons.append("%s larger than a tile" % "{:,}".format(too_large))
+
+        if crossing:
+            reasons.append(
+                "%s crossing tile borders" % "{:,}".format(crossing)
+            )
+
+        items.append(
+            "- `%s`: %s of %s (%s) — %s"
+            % (
+                field,
+                "{:,}".format(c["uncontained"]),
+                "{:,}".format(c["count"]),
+                _format_percent(c["uncontained"], c["count"]),
+                ", ".join(reasons),
+            )
+        )
+
+    if not items:
+        return []
+
+    return ["Objects that no tile fully contains:\n\n" + "\n".join(items)]
+
+
+def _format_percent(part, total):
+    percent = 100 * part / total
+    if 0 < percent < 0.1:
+        return "<0.1%"
+
+    if 99.9 < percent < 100:
+        return ">99.9%"
+
+    return "%.1f%%" % percent
 
 
 def register(p):

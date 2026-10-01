@@ -32,6 +32,12 @@ TILE_FIELD = "tile_regions"
 # Tolerance for comparing normalized coordinates
 _EPS = 1e-9
 
+# Whether a tile fully contains a label; ordered so that a label's status is
+# the max of its statuses in each dimension
+_FITS = 0
+_CROSSES = 1
+_TOO_LARGE = 2
+
 # Label types whose labels are filtered to those that touch each tile
 _LIST_TYPES = (fol.Detections, fol.Polylines, fol.Keypoints)
 _SINGLE_TYPES = (fol.Detection, fol.Polyline, fol.Keypoint)
@@ -252,6 +258,81 @@ def make_tiles_dataset(
     return dataset
 
 
+def count_uncontained_labels(
+    sample_collection, tile_size, overlap=0, fields=None
+):
+    """Counts the labels that no tile of their image would fully contain.
+
+    See :meth:`compute_tiles` for how tiles are laid out. A label that no
+    tile fully contains is either larger than a tile in at least one
+    dimension, which only larger tiles can fix, or crosses the borders
+    between tiles, which more overlap can fix: a label that is no larger
+    than the overlap always fits in a tile.
+
+    Only the part of a label that lies inside its image is considered. The
+    box of a polyline or keypoint is the bounding box of its points.
+
+    Args:
+        sample_collection: a
+            :class:`fiftyone.core.collections.SampleCollection` of images,
+            whose samples must have their
+            :class:`fiftyone.core.metadata.ImageMetadata` populated
+        tile_size: a ``(width, height)`` tuple specifying the tile size in
+            pixels
+        overlap (0): the overlap between adjacent tiles. Values >= 1 are
+            interpreted as pixels; values in [0, 1) are interpreted as
+            fractions of the tile size
+        fields (None): a :class:`fiftyone.core.labels.Detection`,
+            :class:`fiftyone.core.labels.Detections`,
+            :class:`fiftyone.core.labels.Polyline`,
+            :class:`fiftyone.core.labels.Polylines`,
+            :class:`fiftyone.core.labels.Keypoint`, or
+            :class:`fiftyone.core.labels.Keypoints` field or list of such
+            fields to count. By default, all top-level fields of these types
+            are counted
+
+    Returns:
+        a dict mapping each field to a dict with the following keys:
+
+        -   ``count``: the number of labels in the field
+        -   ``uncontained``: the number of labels that no tile fully contains
+        -   ``too_large``: the number of those labels that are larger than a
+            tile in at least one dimension
+    """
+    fova.validate_collection(sample_collection, media_type=fom.IMAGE)
+
+    if sample_collection._is_frames:
+        raise ValueError("Tiles views of frames are not supported")
+
+    tile_w, tile_h, overlap_x, overlap_y = _parse_tiling(tile_size, overlap)
+
+    _validate_metadata(sample_collection)
+
+    label_fields = _parse_label_fields(sample_collection, fields)
+    if not label_fields:
+        return {}
+
+    pipeline = _make_uncontained_pipeline(
+        tile_w, tile_h, tile_w - overlap_x, tile_h - overlap_y, label_fields
+    )
+
+    try:
+        result = next(iter(sample_collection._aggregate(pipeline=pipeline)))
+    except StopIteration:
+        result = {}
+
+    counts = {}
+    for i, path in enumerate(label_fields):
+        key = "f%d" % i
+        counts[path] = {
+            "count": result.get(key + "_count", 0),
+            "uncontained": result.get(key + "_uncontained", 0),
+            "too_large": result.get(key + "_too_large", 0),
+        }
+
+    return counts
+
+
 def _parse_tiling(tile_size, overlap):
     try:
         tile_w, tile_h = tile_size
@@ -353,6 +434,27 @@ def _get_filterable_label_fields(sample_collection, other_fields):
 
         if issubclass(field.document_type, _LIST_TYPES + _SINGLE_TYPES):
             label_fields[path] = field.document_type
+
+    return label_fields
+
+
+def _parse_label_fields(sample_collection, fields):
+    if fields is None:
+        # The label fields that a tiles view would filter
+        other_fields = _parse_other_fields(sample_collection, True)
+        return _get_filterable_label_fields(sample_collection, other_fields)
+
+    if etau.is_str(fields):
+        fields = [fields]
+
+    label_fields = _get_filterable_label_fields(sample_collection, fields)
+
+    unsupported = [f for f in fields if f not in label_fields]
+    if unsupported:
+        raise ValueError(
+            "Field(s) %s are not Detection(s), Polyline(s), or Keypoint(s) "
+            "fields" % unsupported
+        )
 
     return label_fields
 
@@ -508,6 +610,17 @@ def _touches_tile_expr(label, label_type, min_label_coverage):
     """The expression that decides whether a tile keeps a label, given the
     tile's normalized ``[x, y, w, h]`` box in ``$_tile_box``.
     """
+    return _label_box_expr(
+        label, label_type, _box_touches_tile_expr(min_label_coverage), False
+    )
+
+
+def _label_box_expr(label, label_type, in_expr, missing):
+    """Evaluates ``in_expr`` with the label's normalized bounding box bound to
+    ``$$x, $$y, $$w, $$h``, or returns ``missing`` if the label has no box.
+
+    The box of a polyline or keypoint is the bounding box of its points.
+    """
     if issubclass(label_type, fol.Detection):
         box = label + ".bounding_box"
         coords = {
@@ -519,7 +632,13 @@ def _touches_tile_expr(label, label_type, min_label_coverage):
         return {
             "$let": {
                 "vars": coords,
-                "in": _box_touches_tile_expr(min_label_coverage),
+                "in": {
+                    "$cond": [
+                        {"$gte": ["$$x", -math.inf]},  # a missing box
+                        in_expr,
+                        missing,
+                    ]
+                },
             }
         }
 
@@ -556,7 +675,7 @@ def _touches_tile_expr(label, label_type, min_label_coverage):
         "$let": {
             "vars": {"pts": valid_points},
             "in": {
-                "$and": [
+                "$cond": [
                     {"$gt": [{"$size": "$$pts"}, 0]},
                     {
                         "$let": {
@@ -570,9 +689,10 @@ def _touches_tile_expr(label, label_type, min_label_coverage):
                                     "$subtract": [{"$max": ys}, {"$min": ys}]
                                 },
                             },
-                            "in": _box_touches_tile_expr(min_label_coverage),
+                            "in": in_expr,
                         }
                     },
+                    missing,
                 ]
             },
         }
@@ -629,10 +749,166 @@ def _box_touches_tile_expr(min_label_coverage):
         ]
     }
 
+    return {"$cond": [{"$gt": [area, 0]}, overlaps, intersects]}
+
+
+def _make_uncontained_pipeline(
+    tile_w, tile_h, stride_x, stride_y, label_fields
+):
+    # Per sample, each field's list of label statuses (see _box_status_expr)
+    project = {"_id": False}
+    for i, (path, label_type) in enumerate(label_fields.items()):
+        project["f%d" % i] = _label_statuses_expr(
+            path, label_type, tile_w, tile_h, stride_x, stride_y
+        )
+
+    group = {"_id": None}
+    for i in range(len(label_fields)):
+        key = "f%d" % i
+        group[key + "_count"] = {"$sum": {"$size": "$" + key}}
+        group[key + "_uncontained"] = {
+            "$sum": {
+                "$size": {
+                    "$filter": {
+                        "input": "$" + key,
+                        "cond": {"$gt": ["$$this", _FITS]},
+                    }
+                }
+            }
+        }
+        group[key + "_too_large"] = {
+            "$sum": {
+                "$size": {
+                    "$filter": {
+                        "input": "$" + key,
+                        "cond": {"$eq": ["$$this", _TOO_LARGE]},
+                    }
+                }
+            }
+        }
+
+    return [{"$project": project}, {"$group": group}]
+
+
+def _label_statuses_expr(path, label_type, tile_w, tile_h, stride_x, stride_y):
+    field = "$" + path
+    box_status = _box_status_expr(tile_w, tile_h, stride_x, stride_y)
+
+    if issubclass(label_type, _LIST_TYPES):
+        list_field = label_type._LABEL_LIST_FIELD
+        single_type = fol._LABEL_LIST_TO_SINGLE_MAP[label_type]
+        statuses = {
+            "$map": {
+                "input": {"$ifNull": [field + "." + list_field, []]},
+                "as": "label",
+                "in": _label_box_expr(
+                    "$$label", single_type, box_status, None
+                ),
+            }
+        }
+    else:
+        status = _label_box_expr(field, label_type, box_status, None)
+        statuses = {
+            "$cond": [
+                {"$eq": [{"$type": field}, "object"]},
+                [status],
+                [],
+            ]
+        }
+
+    # Labels without a box have no status
+    return {"$filter": {"input": statuses, "cond": {"$ne": ["$$this", None]}}}
+
+
+def _box_status_expr(tile_w, tile_h, stride_x, stride_y):
+    """The status of the box ``$$x, $$y, $$w, $$h`` in the image's tiles:
+    ``_FITS`` if a tile fully contains it, ``_TOO_LARGE`` if it is larger
+    than a tile in at least one dimension, and ``_CROSSES`` otherwise.
+
+    Tiles form a grid, so a tile contains the box if and only if a column of
+    tiles contains its horizontal extent and a row of tiles contains its
+    vertical extent.
+    """
     return {
-        "$cond": [
-            {"$gte": ["$$x", -math.inf]},  # a missing box is dropped
-            {"$cond": [{"$gt": [area, 0]}, overlaps, intersects]},
-            False,
+        "$max": [
+            _span_status_expr(
+                "$$x", "$$w", "$metadata.width", tile_w, stride_x
+            ),
+            _span_status_expr(
+                "$$y", "$$h", "$metadata.height", tile_h, stride_y
+            ),
         ]
     }
+
+
+def _span_status_expr(start, size, img_len, tile_len, stride):
+    """The status of the normalized span ``[start, start + size]`` in the
+    tiles of one dimension; mirrors :meth:`compute_tiles`.
+
+    The best candidate to contain the span is the last tile that starts at
+    or before it.
+    """
+    # The span's part inside the image, in pixels
+    a = {"$multiply": [_clamp_expr(start), img_len]}
+    b = {"$multiply": [_clamp_expr({"$add": [start, size]}), img_len]}
+
+    # Tiles are clamped to the image, and the last one ends at its edge
+    width = {"$min": [tile_len, img_len]}
+    last_start = {"$subtract": [img_len, "$$width"]}
+
+    # Normalized coordinates carry float rounding, so edges are compared with
+    # the same tolerance as when filtering labels, in pixels
+    a_tol = {"$add": ["$$a", {"$multiply": [_EPS, img_len]}]}
+    b_tol = {"$subtract": ["$$b", {"$multiply": [_EPS, img_len]}]}
+
+    start_before = {
+        "$cond": [
+            {"$gte": [a_tol, "$$last"]},
+            "$$last",
+            {"$multiply": [{"$floor": {"$divide": [a_tol, stride]}}, stride]},
+        ]
+    }
+
+    return {
+        "$let": {
+            "vars": {"a": a, "b": b, "width": width},
+            "in": {
+                "$let": {
+                    "vars": {"last": last_start},
+                    "in": {
+                        "$cond": [
+                            {
+                                "$gt": [
+                                    {"$subtract": [b_tol, "$$a"]},
+                                    "$$width",
+                                ]
+                            },
+                            _TOO_LARGE,
+                            {
+                                "$cond": [
+                                    {
+                                        "$gte": [
+                                            {
+                                                "$add": [
+                                                    start_before,
+                                                    "$$width",
+                                                ]
+                                            },
+                                            b_tol,
+                                        ]
+                                    },
+                                    _FITS,
+                                    _CROSSES,
+                                ]
+                            },
+                        ]
+                    },
+                }
+            },
+        }
+    }
+
+
+def _clamp_expr(value):
+    """Clamps a normalized coordinate to the image."""
+    return {"$min": [{"$max": [value, 0]}, 1]}

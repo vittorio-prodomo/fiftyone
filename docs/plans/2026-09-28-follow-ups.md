@@ -139,9 +139,12 @@ when tiled: a view, not a data transformation. It uses the "shift" edge mode,
 clamps tiles that are larger than the image, keeps every label that touches a
 tile (optional `min_label_coverage`), and keeps tags on the tiles only.
 
-1.  **Labels never fully inside any tile**: add to the Preview tiling summary
-    the number of objects that no tile fully contains. This shows when the tile
-    size or overlap is too small for the objects, before applying the tiling.
+1.  **Labels never fully inside any tile** (done): the Preview tiling summary
+    lists, per label field, the objects that no tile fully contains, split into
+    those larger than a tile (the tiles are too small) and those crossing tile
+    borders (the overlap is too small). The counts come from
+    `fiftyone.core.tiles.count_uncontained_labels()`, a single aggregation that
+    uses the grid's structure instead of checking every tile.
 2.  **Live re-zoom in the modal**: changing the Zoom padding slider does not
     re-zoom the image already open in the modal; it applies to the next sample.
     Re-run the zoom on change (`zoomPad` feeds
