@@ -149,10 +149,13 @@ tile (optional `min_label_coverage`), and keeps tags on the tiles only.
     re-zoom the image already open in the modal; it applies to the next sample.
     Re-run the zoom on change (`zoomPad` feeds
     `app/packages/looker/src/zoom.ts`).
-3.  **Export a tiled training set**: turn a tiles view into real data by
-    writing the tile crops and their labels, clipped to the tile and
-    re-normalized to the crop. This is the step from previewing a tiling to
-    training on it.
+3.  **Export a tiled training set** (done for YOLOv5):
+    `TilesView.materialize()` writes the tile crops and builds a dataset with
+    labels clipped to the tiles, and `TilesView.export()` exports them in any
+    format; see `2026-10-02-tiles-export-design.md`. Still open: round-trip
+    tests for the formats other than YOLOv5 and COCO boxes, updating VOC/KITTI
+    `truncated` for clipped boxes, CVAT's crash on NaN keypoints, and an
+    "Export tiles" operator in the tiles plugin.
 4.  **Tags**: tags set on tiles stay local to the tiles view. Decide whether
     they should sync back to the source samples or labels once there is a use
     case.

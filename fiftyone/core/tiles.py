@@ -50,6 +50,10 @@ class TilesView(fop.PatchesView):
 
     Unlike other patches views, a tiles view never writes to its source
     collection: tags and label edits made in the view stay in the view.
+
+    Its labels are in coordinates of the full images. Use
+    :meth:`materialize` or :meth:`export` to turn its tiles into images whose
+    labels are clipped to the tiles.
     """
 
     __slots__ = ()
@@ -57,6 +61,63 @@ class TilesView(fop.PatchesView):
     @property
     def _label_fields(self):
         return []
+
+    def materialize(self, output_dir, **kwargs):
+        """Creates a dataset that contains the tiles of this view as images,
+        whose labels are clipped to the tiles and re-normalized to them.
+
+        See :meth:`fiftyone.utils.tiles.materialize_tiles` for details.
+
+        Examples::
+
+            import fiftyone as fo
+            import fiftyone.zoo as foz
+
+            dataset = foz.load_zoo_dataset("quickstart")
+            dataset.compute_metadata()
+
+            tiles = dataset.to_tiles(tile_size=(256, 256), overlap=32)
+            tiles_dataset = tiles.materialize("/tmp/quickstart-tiles")
+
+        Args:
+            output_dir: the directory in which to write the tile images
+            **kwargs: optional keyword arguments for
+                :meth:`fiftyone.utils.tiles.materialize_tiles`
+
+        Returns:
+            a :class:`fiftyone.core.dataset.Dataset`
+        """
+        import fiftyone.utils.tiles as fout
+
+        return fout.materialize_tiles(self, output_dir, **kwargs)
+
+    def export(self, *args, **kwargs):
+        """Exports the tiles of this view as images, whose labels are clipped
+        to the tiles and re-normalized to them, in any format.
+
+        Takes the same arguments as
+        :meth:`fiftyone.core.collections.SampleCollection.export`, except
+        that ``export_media`` can only be ``True`` or ``"move"``. See
+        :meth:`fiftyone.utils.tiles.export_tiles` for details.
+
+        Examples::
+
+            import fiftyone as fo
+            import fiftyone.zoo as foz
+
+            dataset = foz.load_zoo_dataset("quickstart")
+            dataset.compute_metadata()
+
+            tiles = dataset.to_tiles(tile_size=(256, 256), overlap=32)
+            tiles.export(
+                export_dir="/tmp/quickstart-yolo",
+                dataset_type=fo.types.YOLOv5Dataset,
+                label_field="ground_truth",
+            )
+        """
+        import fiftyone.utils.tiles as fout
+
+        return fout.export_tiles(self, *args, **kwargs)
 
 
 def compute_tiles(img_w, img_h, tile_size, overlap=0):
