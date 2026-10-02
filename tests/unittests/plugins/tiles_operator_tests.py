@@ -516,6 +516,171 @@ class ExportTilesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ExportTiles().execute(ctx)
 
+    def _split_dataset(self):
+        """Four 1000x500 images, cut into 600x500 tiles at x=0 and x=400:
+        two tagged ``train``, one ``val``, and one with no split.
+        """
+        dataset = self._dataset()
+        copies = []
+        for sample in dataset:
+            filepath = sample.filepath.replace(".png", "_copy.png")
+            shutil.copy(sample.filepath, filepath)
+            copies.append(fo.Sample(filepath=filepath, gt=sample.gt))
+
+        dataset.add_samples(copies)
+        dataset.compute_metadata()
+        ids = dataset.values("id")
+        dataset.select(ids[:2]).tag_samples("train")
+        dataset.select(ids[2]).tag_samples("val")
+        dataset.select(ids[3]).tag_samples("other")
+        dataset.add_sample_field("split", fo.StringField)
+        dataset.set_values("split", ["a", "b", "a", None])
+        return dataset
+
+    @drop_datasets
+    def test_split_form(self):
+        dataset = self._split_dataset()
+        tiles = dataset.to_tiles((600, 600))
+
+        def inputs(**params):
+            return _inputs(self._ctx(dataset, tiles, **params), ExportTiles())
+
+        # no splits by default, and YOLOv5's single split
+        props = inputs()
+        self.assertEqual(props["split_by"].default, "none")
+        self.assertEqual(
+            props["split_by"].type.values, ["none", "tags", "field", "random"]
+        )
+        self.assertIn("split", props)
+        self.assertNotIn("split_tags", props)
+
+        # the split tags that the images have are proposed
+        props = inputs(split_by="tags")
+        self.assertNotIn("split", props)
+        self.assertEqual(props["split_tags"].default, ["train", "val"])
+        self.assertEqual(
+            [c.value for c in props["split_tags"].view.choices],
+            ["other", "train", "val"],
+        )
+        summary = props["summary"].default
+        self.assertIn("`train`: 4 tile(s) of 2 image(s)", summary)
+        self.assertIn("`val`: 2 tile(s) of 1 image(s)", summary)
+        self.assertIn("1 image(s) are in no split", summary)
+
+        # an image in two splits is invalid
+        props = inputs(split_by="tags", split_tags=["train", "other", "val"])
+        self.assertNotIn("invalid_splits", props)
+        dataset.select(dataset.first().id).tag_samples("val")
+        props = inputs(split_by="tags", split_tags=["train", "val"])
+        self.assertTrue(props["invalid_splits"].invalid)
+        self.assertNotIn("summary", props)
+
+        # string fields of the images, whose values are the splits
+        props = inputs(split_by="field")
+        self.assertEqual(props["split_field"].type.values, ["split"])
+        summary = props["summary"].default
+        self.assertIn("`a`: 4 tile(s) of 2 image(s)", summary)
+        self.assertIn("`b`: 2 tile(s) of 1 image(s)", summary)
+
+        # random splits leave out the splits of 0
+        props = inputs(split_by="random")
+        self.assertEqual(
+            {
+                k: p.default
+                for k, p in props["split_fracs"].type.properties.items()
+            },
+            {"train": 0.8, "val": 0.2, "test": 0.0},
+        )
+        self.assertEqual(props["split_seed"].default, 51)
+        self.assertFalse(props["tag_splits"].default)
+        summary = props["summary"].default
+        self.assertIn("`train`: 6 tile(s) of 3 image(s)", summary)
+        self.assertIn("`val`: 2 tile(s) of 1 image(s)", summary)
+        self.assertNotIn("`test`", summary)
+
+        props = inputs(
+            split_by="random",
+            split_fracs={"train": 0, "val": 0, "test": 0},
+        )
+        self.assertTrue(props["invalid_splits"].invalid)
+
+    @drop_datasets
+    def test_split_execute(self):
+        dataset = self._split_dataset()
+        tiles = dataset.to_tiles((600, 600))
+
+        # YOLOv5 splits by tags, in one dataset.yaml
+        export_dir = os.path.join(self.tmp, "yolo")
+        ctx = self._ctx(
+            dataset,
+            tiles,
+            format="yolov5",
+            label_field="gt",
+            export_dir={"absolute_path": export_dir},
+            split_by="tags",
+            split_tags=["train", "val"],
+        )
+        result = ExportTiles().execute(ctx)
+        self.assertEqual(result["num_tiles"], 6)
+        self.assertEqual(result["splits"], "train: 4, val: 2")
+        for split, num_images in (("train", 4), ("val", 2)):
+            images_dir = os.path.join(export_dir, "images", split)
+            self.assertEqual(len(os.listdir(images_dir)), num_images)
+
+        with open(os.path.join(export_dir, "dataset.yaml")) as f:
+            yaml = f.read()
+
+        self.assertIn("train: ./images/train/", yaml)
+        self.assertIn("val: ./images/val/", yaml)
+
+        # other formats, in a directory per split
+        export_dir = os.path.join(self.tmp, "coco")
+        ctx = self._ctx(
+            dataset,
+            tiles,
+            format="coco",
+            label_field="gt",
+            export_dir={"absolute_path": export_dir},
+            split_by="field",
+            split_field="split",
+        )
+        result = ExportTiles().execute(ctx)
+        self.assertEqual(result["splits"], "a: 4, b: 2")
+        self.assertEqual(sorted(os.listdir(export_dir)), ["a", "b"])
+
+        # a random split, saved as tags of the images, which replace their
+        # tags of the random splits
+        export_dir = os.path.join(self.tmp, "random")
+        ctx = self._ctx(
+            dataset,
+            tiles,
+            format="images",
+            export_dir={"absolute_path": export_dir},
+            split_by="random",
+            split_fracs={"train": 0.5, "val": 0.5, "test": 0},
+            split_seed=3,
+            tag_splits=True,
+        )
+        result = ExportTiles().execute(ctx)
+        self.assertEqual(result["num_tiles"], 8)
+        self.assertEqual(result["splits"], "train: 4, val: 4")
+        self.assertEqual(dataset.count_sample_tags()["train"], 2)
+        self.assertEqual(dataset.count_sample_tags()["val"], 2)
+        self.assertEqual(
+            len(dataset.match_tags(["train", "val"], all=True)), 0
+        )
+        self.assertEqual(dataset.count_sample_tags()["other"], 1)
+        for split in ("train", "val"):
+            stems = {
+                f.rsplit("_tile_", 1)[0]
+                for f in os.listdir(os.path.join(export_dir, split))
+            }
+            expected = {
+                os.path.splitext(os.path.basename(p))[0]
+                for p in dataset.match_tags(split).values("filepath")
+            }
+            self.assertEqual(stems, expected)
+
 
 if __name__ == "__main__":
     fo.config.show_progress_bars = False

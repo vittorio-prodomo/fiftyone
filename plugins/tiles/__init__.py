@@ -15,6 +15,7 @@ import fiftyone.core.stages as fosg
 import fiftyone.core.tiles as fot
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
+import fiftyone.utils.tiles as fout
 from fiftyone import ViewField as F
 
 _DEFAULT_TILE_SIZE = 640
@@ -121,6 +122,21 @@ _EMPTY_TILES = (
 )
 
 _YOLO_SPLITS = ("train", "val", "test")
+
+# Where the splits of the images come from
+_SPLIT_BY = (
+    ("none", "None"),
+    ("tags", "Sample tags"),
+    ("field", "Field"),
+    ("random", "Random"),
+)
+
+# The sample tags that the form proposes as splits, when the images have them
+_SPLIT_TAGS = ("train", "val", "validation", "test")
+
+# The splits of a random split, and their default fractions
+_RANDOM_SPLITS = (("train", 0.8), ("val", 0.2), ("test", 0.0))
+_DEFAULT_SEED = 51
 
 _MAX_CLASSES_SHOWN = 8
 
@@ -642,7 +658,9 @@ class ExportTiles(foo.Operator):
                 ),
             )
 
-        if fmt.dataset_type is fo.types.YOLOv5Dataset:
+        split_by, split_params = _add_split_inputs(ctx, inputs, fmt)
+
+        if split_by == "none" and fmt.dataset_type is fo.types.YOLOv5Dataset:
             split_choices = types.Dropdown()
             for split in _YOLO_SPLITS:
                 split_choices.add_choice(split, label=split)
@@ -653,8 +671,7 @@ class ExportTiles(foo.Operator):
                 default="train",
                 label="Split",
                 description=(
-                    "Export each split separately into the same directory "
-                    "to build a YOLOv5 dataset"
+                    "The YOLOv5 split in which to export all the tiles"
                 ),
                 view=split_choices,
             )
@@ -670,8 +687,14 @@ class ExportTiles(foo.Operator):
         )
 
         summary = _summarize_export(ctx, fmt, label_field)
-        if summary:
-            inputs.md(summary, name="summary")
+        if split_by != "none":
+            split_summary = _summarize_splits(ctx, inputs, split_params)
+            if split_summary is None:
+                return types.Property(inputs, view=view)
+
+            summary += "\n\n" + split_summary
+
+        inputs.md(summary, name="summary")
 
         return types.Property(inputs, view=view)
 
@@ -708,38 +731,343 @@ class ExportTiles(foo.Operator):
                 if classes:
                     kwargs["classes"] = classes
 
-        if fmt.dataset_type is fo.types.YOLOv5Dataset:
-            kwargs["split"] = ctx.params.get("split") or "train"
+        split_kwargs = _get_split_kwargs(ctx.params)
+        if split_kwargs is None:
+            if fmt.dataset_type is fo.types.YOLOv5Dataset:
+                kwargs["split"] = ctx.params.get("split") or "train"
 
-        num_tiles = ctx.view.export(progress=_ExportProgress(ctx), **kwargs)
+            num_tiles = ctx.view.export(
+                progress=_ExportProgress(ctx), **kwargs
+            )
+            return {"num_tiles": num_tiles, "export_dir": export_dir}
 
-        return {"num_tiles": num_tiles, "export_dir": export_dir}
+        split_ids = fout.get_splits(ctx.view, **split_kwargs)
+        num_writes = _count_split_writes(ctx, fmt, split_ids)
+        counts = ctx.view.export(
+            progress=_ExportProgress(ctx, num_writes=num_writes),
+            **split_kwargs,
+            **kwargs,
+        )
+
+        if ctx.params.get("split_by") == "random" and ctx.params.get(
+            "tag_splits", False
+        ):
+            _tag_splits(ctx, split_ids)
+
+        return {
+            "num_tiles": sum(counts.values()),
+            "splits": ", ".join(
+                "%s: %d" % (name, count) for name, count in counts.items()
+            ),
+            "export_dir": export_dir,
+        }
 
     def resolve_output(self, ctx):
         outputs = types.Object()
         outputs.int("num_tiles", label="Tiles exported")
+        if ctx.results.get("splits"):
+            outputs.str("splits", label="Tiles per split")
+
         outputs.str("export_dir", label="Export directory")
         return types.Property(outputs, view=types.View(label="Export tiles"))
 
 
 class _ExportProgress(object):
     """Reports the progress of a tiles export, which first crops the tiles
-    and then writes them.
+    and then writes them, in one or more exports (one per split). Cropping
+    and writing each take half of the progress bar.
     """
 
-    _PHASES = ("Cropping the tiles", "Writing the export")
-
-    def __init__(self, ctx):
+    def __init__(self, ctx, num_writes=1):
         self._ctx = ctx
+        self._num_writes = max(num_writes, 1)
         self._bars = []
 
     def __call__(self, pb):
         if not self._bars or self._bars[-1] is not pb:
             self._bars.append(pb)
 
-        phase = min(len(self._bars), len(self._PHASES)) - 1
-        progress = (phase + (pb.progress or 0)) / len(self._PHASES)
-        self._ctx.set_progress(progress=progress, label=self._PHASES[phase])
+        progress = pb.progress or 0
+        if len(self._bars) == 1:
+            self._ctx.set_progress(
+                progress=progress / 2, label="Cropping the tiles"
+            )
+            return
+
+        write = min(len(self._bars) - 1, self._num_writes)
+        label = "Writing the export"
+        if self._num_writes > 1:
+            label += " (%d of %d)" % (write, self._num_writes)
+
+        progress = 0.5 + (write - 1 + progress) / (2 * self._num_writes)
+        self._ctx.set_progress(progress=progress, label=label)
+
+
+def _add_split_inputs(ctx, inputs, fmt):
+    """Adds the inputs that split the images, and returns where their splits
+    come from and the form's parameters, with the defaults of the split
+    inputs that have no value yet, or None if the splits are invalid.
+    """
+    params = dict(ctx.params)
+
+    split_choices = types.RadioGroup()
+    for value, label in _SPLIT_BY:
+        split_choices.add_choice(value, label=label)
+
+    inputs.enum(
+        "split_by",
+        split_choices.values(),
+        default="none",
+        label="Splits",
+        description=(
+            "Where each image's split comes from; all the tiles of an image "
+            "go to its split. %s" % _describe_split_layout(fmt)
+        ),
+        view=split_choices,
+    )
+
+    split_by = params.get("split_by") or "none"
+
+    if split_by == "tags":
+        tags = _get_source_images(ctx).distinct("tags")
+        if not tags:
+            prop = inputs.str(
+                "no_tags",
+                label="The images have no tags",
+                view=types.Warning(),
+            )
+            prop.invalid = True
+            return split_by, None
+
+        default = [t for t in _SPLIT_TAGS if t in tags]
+        if params.get("split_tags") is None:
+            params["split_tags"] = default
+
+        inputs.list(
+            "split_tags",
+            types.String(),
+            default=default,
+            required=True,
+            label="Split tags",
+            description="The tags of the images that are splits",
+            view=types.AutocompleteView(
+                multiple=True,
+                choices=[types.Choice(t, label=t) for t in tags],
+                allow_user_input=False,
+                allow_duplicates=False,
+            ),
+        )
+    elif split_by == "field":
+        fields = _get_split_fields(ctx)
+        if not fields:
+            prop = inputs.str(
+                "no_split_fields",
+                label="The images have no string field",
+                view=types.Warning(),
+            )
+            prop.invalid = True
+            return split_by, None
+
+        if params.get("split_field") not in fields:
+            params["split_field"] = fields[0]
+
+        field_choices = types.Dropdown()
+        for field in fields:
+            field_choices.add_choice(field, label=field)
+
+        inputs.enum(
+            "split_field",
+            field_choices.values(),
+            default=fields[0],
+            required=True,
+            label="Split field",
+            description=(
+                "A string field of the images, whose values are their splits"
+            ),
+            view=field_choices,
+        )
+    elif split_by == "random":
+        fracs = types.Object()
+        for name, frac in _RANDOM_SPLITS:
+            fracs.float(name, default=frac, min=0, label=name)
+
+        inputs.define_property(
+            "split_fracs",
+            fracs,
+            label="Split fractions",
+            description="Normalized to sum to 1; splits of 0 are left out",
+            view=types.HStackView(),
+        )
+        inputs.int(
+            "split_seed",
+            default=_DEFAULT_SEED,
+            label="Random seed",
+            description="The same seed and images give the same split",
+        )
+        inputs.bool(
+            "tag_splits",
+            default=False,
+            label="Tag the images with their split",
+            description=(
+                "After the export, replaces the train, val, and test tags of "
+                "the images with their split, to reuse it as sample tags"
+            ),
+        )
+
+    return split_by, params
+
+
+def _describe_split_layout(fmt):
+    if fmt.dataset_type is fo.types.YOLOv5Dataset:
+        return (
+            "Splits go to images/<split> and labels/<split>, listed in one "
+            "dataset.yaml"
+        )
+
+    if fmt.dataset_type is fo.types.FiftyOneDataset:
+        return "Tiles are tagged with their split"
+
+    return "Each split goes to its own <split> directory"
+
+
+def _get_split_kwargs(params):
+    """The split arguments of :meth:`fiftyone.utils.tiles.get_splits` that
+    the form's parameters define, or None if the images are not split.
+    """
+    split_by = params.get("split_by") or "none"
+    if split_by == "none":
+        return None
+
+    if split_by == "tags":
+        split_tags = params.get("split_tags") or []
+        if not split_tags:
+            raise ValueError("Choose the tags that are splits")
+
+        return {"splits": list(split_tags), "split_field": "tags"}
+
+    if split_by == "field":
+        split_field = params.get("split_field")
+        if not split_field:
+            raise ValueError("Choose the field that holds the splits")
+
+        return {"split_field": split_field}
+
+    if split_by == "random":
+        fracs = params.get("split_fracs") or {}
+        split_fracs = {}
+        for name, default in _RANDOM_SPLITS:
+            frac = fracs.get(name)
+            frac = default if frac is None else float(frac)
+            if frac < 0:
+                raise ValueError("Split fractions cannot be negative")
+
+            if frac > 0:
+                split_fracs[name] = frac
+
+        if not split_fracs:
+            raise ValueError("Give at least one split a fraction above 0")
+
+        seed = params.get("split_seed")
+        return {
+            "splits": split_fracs,
+            "seed": _DEFAULT_SEED if seed is None else int(seed),
+        }
+
+    raise ValueError("Invalid choice %r" % split_by)
+
+
+def _summarize_splits(ctx, inputs, params):
+    """A markdown summary of the splits, or None if they are invalid, in
+    which case the inputs have an invalid warning.
+    """
+    if params is None:
+        return None
+
+    def _invalid(message):
+        prop = inputs.str(
+            "invalid_splits", label=message, view=types.Warning()
+        )
+        prop.invalid = True
+
+    try:
+        split_kwargs = _get_split_kwargs(params)
+        split_ids = fout.get_splits(ctx.view, **split_kwargs)
+    except ValueError as e:
+        _invalid(str(e))
+        return None
+
+    image_splits = Counter(_id for ids in split_ids.values() for _id in ids)
+    num_shared = sum(1 for c in image_splits.values() if c > 1)
+    if num_shared:
+        _invalid(
+            "%s image(s) are in more than one split"
+            % "{:,}".format(num_shared)
+        )
+        return None
+
+    if not split_ids:
+        _invalid("The images have no splits")
+        return None
+
+    num_tiles = ctx.view.count_values("sample_id")
+    lines = []
+    for name, ids in split_ids.items():
+        lines.append(
+            "- `%s`: %s tile(s) of %s image(s)"
+            % (
+                name,
+                "{:,}".format(sum(num_tiles.get(_id, 0) for _id in ids)),
+                "{:,}".format(len(ids)),
+            )
+        )
+
+    num_unassigned = len(num_tiles) - len(image_splits)
+    if num_unassigned:
+        lines.append(
+            "\n%s image(s) are in no split: their tiles are not exported"
+            % "{:,}".format(num_unassigned)
+        )
+
+    return "\n".join(lines)
+
+
+def _count_split_writes(ctx, fmt, split_ids):
+    """The number of exports that write the splits."""
+    if fmt.dataset_type is fo.types.FiftyOneDataset:
+        return 1
+
+    num_tiles = ctx.view.count_values("sample_id")
+    return sum(
+        1
+        for ids in split_ids.values()
+        if any(num_tiles.get(_id) for _id in ids)
+    )
+
+
+def _tag_splits(ctx, split_ids):
+    """Tags the source images with their split, replacing their tags of the
+    random splits.
+    """
+    dataset = ctx.view._root_dataset
+    names = [name for name, _ in _RANDOM_SPLITS]
+    ids = [_id for ids in split_ids.values() for _id in ids]
+    dataset.select(ids).untag_samples(names)
+    for name, ids in split_ids.items():
+        if ids:
+            dataset.select(ids).tag_samples(name)
+
+
+def _get_source_images(ctx):
+    """The source images of the tiles view."""
+    return ctx.view._source_collection.select(ctx.view.distinct("sample_id"))
+
+
+def _get_split_fields(ctx):
+    """The top-level string fields of the source images, which may hold
+    their splits.
+    """
+    schema = ctx.view._source_collection.get_field_schema(ftype=fo.StringField)
+    return [f for f in schema if f != "filepath"]
 
 
 def _get_empty_tiles_choices(fmt):

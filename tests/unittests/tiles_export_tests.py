@@ -6,6 +6,7 @@ FiftyOne tiles materialization and export unit tests.
 |
 """
 
+import json
 import math
 import os
 import random
@@ -1231,6 +1232,265 @@ class ExportTilesTests(_TilesDatasetTests):
         self.assertEqual(len(tmp_dirs), 2)
         self.assertFalse(any(os.path.exists(d) for d in tmp_dirs))
         self.assertEqual(set(fo.list_datasets()), datasets)
+
+
+class SplitTests(_TilesDatasetTests):
+    _LABELS = ("cat", "dog", "bird", "fish", "cow")
+
+    def _split_dataset(self):
+        """Five 1000x500 images, cut into 600x500 tiles at x=0 and x=400,
+        each with one label in its left tile: two tagged ``train``, two
+        ``val``, and one with no split.
+        """
+        return self._dataset(
+            {
+                "img%d.png" % i: _coords_image(1000, 500)
+                for i in range(len(self._LABELS))
+            },
+            gt=[
+                fo.Detections(
+                    detections=[
+                        fo.Detection(
+                            label=label, bounding_box=[0.1, 0.1, 0.1, 0.2]
+                        )
+                    ]
+                )
+                for label in self._LABELS
+            ],
+            tags=[["train"], ["train"], ["val"], ["val", "other"], []],
+            split=["a", "b", "a", None, "b"],
+        )
+
+    def _image_stems(self, export_dir):
+        """The stems of the source images of the exported tile images."""
+        return {
+            f.rsplit("_tile_", 1)[0]
+            for f in os.listdir(export_dir)
+            if f.endswith(".png")
+        }
+
+    @drop_datasets
+    def test_get_splits_by_tags(self):
+        dataset = self._split_dataset()
+        ids = dataset.values("id")
+        tiles = dataset.to_tiles((600, 600))
+
+        splits = fout.get_splits(tiles, ["train", "val"])
+        self.assertEqual(list(splits), ["train", "val"])
+        self.assertEqual(sorted(splits["train"]), sorted(ids[:2]))
+        self.assertEqual(sorted(splits["val"]), sorted(ids[2:4]))
+
+        # all the tags, by default
+        splits = fout.get_splits(tiles, split_field="tags")
+        self.assertEqual(list(splits), ["other", "train", "val"])
+
+        # an image with two of the tags is in both splits
+        dataset.select(ids[0]).tag_samples("val")
+        splits = fout.get_splits(tiles, ["train", "val"])
+        self.assertIn(ids[0], splits["train"])
+        self.assertIn(ids[0], splits["val"])
+
+        # only the images of the view
+        view = tiles.match(F("filepath").ends_with("img2.png"))
+        splits = fout.get_splits(view, ["train", "val"])
+        self.assertEqual(splits, {"train": [], "val": [ids[2]]})
+
+    @drop_datasets
+    def test_get_splits_by_field(self):
+        dataset = self._split_dataset()
+        ids = dataset.values("id")
+        tiles = dataset.to_tiles((600, 600))
+
+        splits = fout.get_splits(tiles, split_field="split")
+        self.assertEqual(list(splits), ["a", "b"])
+        self.assertEqual(sorted(splits["a"]), sorted([ids[0], ids[2]]))
+        self.assertEqual(sorted(splits["b"]), sorted([ids[1], ids[4]]))
+
+        splits = fout.get_splits(tiles, ["b"], split_field="split")
+        self.assertEqual(list(splits), ["b"])
+
+    @drop_datasets
+    def test_random_split(self):
+        dataset = self._split_dataset()
+        ids = dataset.values("id")
+        tiles = dataset.to_tiles((600, 600))
+
+        fracs = {"train": 0.6, "val": 0.4}
+        splits = fout.get_splits(tiles, fracs, seed=1)
+        self.assertEqual(list(splits), ["train", "val"])
+        self.assertEqual([len(v) for v in splits.values()], [3, 2])
+        self.assertEqual(sorted(splits["train"] + splits["val"]), sorted(ids))
+
+        # reproducible, whatever the order of the tiles
+        self.assertEqual(fout.get_splits(tiles, fracs, seed=1), splits)
+        reverse = tiles.sort_by("filepath", reverse=True)
+        self.assertEqual(fout.get_splits(reverse, fracs, seed=1), splits)
+
+        # the fractions are normalized, and may be zero
+        splits = fout.get_splits(
+            tiles, {"train": 3, "val": 2, "test": 0}, seed=1
+        )
+        self.assertEqual([len(v) for v in splits.values()], [3, 2, 0])
+
+    @drop_datasets
+    def test_invalid_splits(self):
+        dataset = self._split_dataset()
+        tiles = dataset.to_tiles((600, 600))
+
+        for kwargs in (
+            {"splits": {"train": 1}, "split_field": "tags"},
+            {"splits": {"train": -1, "val": 1}},
+            {"splits": {"train": 0}},
+            {"splits": []},
+            {"splits": ["train", "train"]},
+            {"splits": ["a/b"]},
+            {"split_field": "gt"},
+            {"split_field": "missing"},
+        ):
+            with self.assertRaises(ValueError, msg=kwargs):
+                fout.get_splits(tiles, **kwargs)
+
+    @drop_datasets
+    def test_export_yolov5_splits(self):
+        dataset = self._split_dataset()
+        tiles = dataset.to_tiles((600, 600))
+        export_dir = os.path.join(self.tmp, "yolo")
+
+        # the export directory is deleted once, before the first split
+        stale = os.path.join(export_dir, "stale.txt")
+        os.makedirs(export_dir)
+        open(stale, "w").close()
+
+        counts = tiles.export(
+            export_dir,
+            dataset_type=fo.types.YOLOv5Dataset,
+            label_field="gt",
+            splits=["train", "val"],
+            overwrite=True,
+        )
+
+        self.assertEqual(dict(counts), {"train": 4, "val": 4})
+        self.assertFalse(os.path.exists(stale))
+        for split, stems in (
+            ("train", {"img0", "img1"}),
+            ("val", {"img2", "img3"}),
+        ):
+            images_dir = os.path.join(export_dir, "images", split)
+            self.assertEqual(self._image_stems(images_dir), stems)
+            self.assertEqual(len(os.listdir(images_dir)), 4)
+
+        # the splits share the classes, so that they agree on the indices
+        for split, labels in (
+            ("train", {"cat", "dog"}),
+            ("val", {"bird", "fish"}),
+        ):
+            imported = fo.Dataset.from_dir(
+                dataset_dir=export_dir,
+                dataset_type=fo.types.YOLOv5Dataset,
+                split=split,
+                label_field="gt",
+            )
+            self.assertEqual(
+                set(imported.distinct("gt.detections.label")), labels
+            )
+
+        # negative tiles are skipped in every split
+        counts = tiles.export(
+            os.path.join(self.tmp, "yolo_skip"),
+            dataset_type=fo.types.YOLOv5Dataset,
+            label_field="gt",
+            splits=["train", "val"],
+            empty_tiles="skip",
+        )
+        self.assertEqual(dict(counts), {"train": 2, "val": 2})
+
+    @drop_datasets
+    def test_export_splits_in_directories(self):
+        dataset = self._split_dataset()
+        tiles = dataset.to_tiles((600, 600))
+        export_dir = os.path.join(self.tmp, "coco")
+
+        counts = tiles.export(
+            export_dir,
+            dataset_type=fo.types.COCODetectionDataset,
+            label_field="gt",
+            splits={"train": 0.6, "val": 0.4},
+            seed=1,
+        )
+
+        self.assertEqual(dict(counts), {"train": 6, "val": 4})
+        self.assertEqual(sorted(os.listdir(export_dir)), ["train", "val"])
+
+        stems = []
+        categories = []
+        for split in ("train", "val"):
+            split_dir = os.path.join(export_dir, split)
+            stems.append(self._image_stems(os.path.join(split_dir, "data")))
+            with open(os.path.join(split_dir, "labels.json")) as f:
+                categories.append(json.load(f)["categories"])
+
+        # all the tiles of an image are in the same split, and the splits
+        # share the categories
+        self.assertEqual(len(stems[0] | stems[1]), 5)
+        self.assertFalse(stems[0] & stems[1])
+        self.assertEqual(categories[0], categories[1])
+        self.assertEqual(len(categories[0]), 5)
+
+    @drop_datasets
+    def test_export_fiftyone_dataset_splits(self):
+        dataset = self._split_dataset()
+        tiles = dataset.to_tiles((600, 600))
+        export_dir = os.path.join(self.tmp, "fo")
+
+        counts = tiles.export(
+            export_dir,
+            dataset_type=fo.types.FiftyOneDataset,
+            split_field="split",
+        )
+
+        # the image without a value has no split
+        self.assertEqual(dict(counts), {"a": 4, "b": 4})
+        imported = fo.Dataset.from_dir(
+            dataset_dir=export_dir, dataset_type=fo.types.FiftyOneDataset
+        )
+        self.assertEqual(len(imported), 8)
+        self.assertEqual(len(imported.match_tags("a")), 4)
+        self.assertEqual(len(imported.match_tags("b")), 4)
+        self.assertEqual(len(imported.match_tags(["a", "b"], all=True)), 0)
+
+    @drop_datasets
+    def test_split_export_errors(self):
+        dataset = self._split_dataset()
+        tiles = dataset.to_tiles((600, 600))
+        export_dir = os.path.join(self.tmp, "yolo")
+        kwargs = dict(
+            dataset_type=fo.types.YOLOv5Dataset,
+            label_field="gt",
+            splits=["train", "val"],
+        )
+
+        for extra in (
+            {"export_dir": export_dir, "split": "train"},
+            {"export_dir": export_dir, "data_path": "images"},
+            {"labels_path": os.path.join(self.tmp, "labels")},
+        ):
+            with self.assertRaises(ValueError, msg=extra):
+                tiles.export(**extra, **kwargs)
+
+        exporter = fouy.YOLOv5DatasetExporter(export_dir)
+        with self.assertRaises(ValueError):
+            tiles.export(
+                dataset_exporter=exporter,
+                label_field="gt",
+                splits=["train", "val"],
+            )
+
+        # an image cannot be in two splits
+        dataset.select(dataset.first().id).tag_samples("val")
+        with self.assertRaises(ValueError):
+            tiles.export(export_dir, **kwargs)
+
+        self.assertFalse(os.path.exists(export_dir))
 
 
 def _stem(path):

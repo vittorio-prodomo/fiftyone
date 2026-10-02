@@ -10,14 +10,17 @@ clipped to the tile and re-normalized to it.
 |
 """
 
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 import fnmatch
+import inspect
 import logging
 import math
 import os
 import re
 
+from bson import ObjectId
 import cv2
+import numpy as np
 from PIL import Image, ImageOps
 
 import eta.core.utils as etau
@@ -178,6 +181,9 @@ def export_tiles(
     progress=None,
     empty_tiles="keep",
     join_polygon_parts=False,
+    splits=None,
+    split_field=None,
+    seed=None,
     **kwargs,
 ):
     """Exports the tiles of a tiles view as images with clipped labels.
@@ -206,6 +212,42 @@ def export_tiles(
     Note that trainers such as Ultralytics' (YOLOv3 since 2018, YOLOv5, and
     YOLOv8 and later) and Darknet use both as background images (negatives),
     so ``"skip"`` is the way to leave them out of training.
+
+    ``splits`` and ``split_field`` export the tiles in splits, such as
+    ``train`` and ``val``. All the tiles of an image go to the same split,
+    since tiles of one image share their scene and may overlap or share
+    objects. The splits come from the source images, as described in
+    :meth:`get_splits`, and the tiles of the images in none of them are not
+    exported. Each format writes its splits as follows:
+
+    -   YOLOv5: in ``images/<split>/`` and ``labels/<split>/``, listed in one
+        ``dataset.yaml``
+    -   FiftyOne dataset: in one export, each tile tagged with its split
+    -   Other formats: in ``<export_dir>/<split>/``
+
+    Formats whose exporters take ``classes`` get the classes of all the
+    splits, unless provided, so that the class indices of the splits agree.
+
+    Example::
+
+        tiles = dataset.to_tiles(640)
+
+        # The sample tags of the images
+        tiles.export(
+            "/path/for/yolo",
+            fo.types.YOLOv5Dataset,
+            label_field="ground_truth",
+            splits=["train", "val"],
+        )
+
+        # A random split of the images
+        tiles.export(
+            "/path/for/coco",
+            fo.types.COCODetectionDataset,
+            label_field="ground_truth",
+            splits={"train": 0.8, "val": 0.2},
+            seed=51,
+        )
 
     Args:
         tiles_view: a :class:`fiftyone.core.tiles.TilesView`
@@ -244,11 +286,21 @@ def export_tiles(
             that a tile cuts into several parts as one shape, whose parts are
             joined by zero-area edges along the tile's border, rather than
             one shape per part. See :meth:`clip_label`
+        splits (None): the splits in which to export the tiles: a list of
+            split names, or a dict mapping split names to fractions for a
+            random split. See :meth:`get_splits`. Splits require
+            ``export_dir``, and replace ``data_path``, ``labels_path``,
+            ``dataset_exporter``, and the ``split`` of YOLOv5
+        split_field (None): the field of the source images that holds their
+            splits, which defaults to ``"tags"`` when ``splits`` is a list.
+            See :meth:`get_splits`
+        seed (None): the random seed of a random split
         **kwargs: optional keyword arguments to pass to the dataset
             exporter's constructor
 
     Returns:
-        the number of tiles exported
+        the number of tiles exported, or, with splits, a dict mapping the
+        split names to the numbers of tiles exported in each
     """
     if empty_tiles not in _EMPTY_TILES:
         raise ValueError(
@@ -262,6 +314,17 @@ def export_tiles(
             "`empty_tiles=%r` requires `label_field`, whose labels decide "
             "which tiles are empty" % empty_tiles
         )
+
+    split_ids = None
+    if splits is not None or split_field is not None:
+        _validate_split_export(
+            export_dir, data_path, labels_path, dataset_exporter, kwargs
+        )
+        split_ids = _get_export_splits(tiles_view, splits, split_field, seed)
+        image_ids = [
+            ObjectId(_id) for ids in split_ids.values() for _id in ids
+        ]
+        tiles_view = tiles_view.match(F("_sample_id").is_in(image_ids))
 
     num_tiles = len(tiles_view)
     if empty_tiles == "skip":
@@ -320,13 +383,27 @@ def export_tiles(
         if dataset_exporter is None:
             kwargs["export_media"] = "move"
 
+        if rel_dir is not None:
+            kwargs["rel_dir"] = tmp_dir
+
+        if split_ids is not None:
+            return _export_splits(
+                export_view,
+                split_ids,
+                export_dir,
+                dataset_type,
+                label_field,
+                overwrite,
+                progress,
+                kwargs,
+            )
+
         num_exported = len(export_view)
         export_view.export(
             export_dir=export_dir,
             dataset_type=dataset_type,
             data_path=data_path,
             labels_path=labels_path,
-            rel_dir=tmp_dir if rel_dir is not None else None,
             dataset_exporter=dataset_exporter,
             label_field=label_field,
             frame_labels_field=frame_labels_field,
@@ -341,6 +418,93 @@ def export_tiles(
         etau.delete_dir(tmp_dir)
 
     return num_exported
+
+
+def get_splits(tiles_view, splits=None, split_field=None, seed=None):
+    """Assigns the images of a tiles view to splits, so that all the tiles of
+    an image go to the same split.
+
+    The splits come from a field of the source images, or are random:
+
+    -   With a list of split names, or none, the splits come from
+        ``split_field`` of the source images, which defaults to ``"tags"``:
+        a string field, whose value is the image's split, or a list of
+        strings field, such as ``tags``, that contains it. The splits default
+        to all the values of the field
+    -   With a dict mapping split names to fractions, the images are split
+        randomly in these proportions, normalized to sum to 1
+
+    Example::
+
+        tiles = dataset.to_tiles(640)
+
+        # The sample tags of the images
+        splits = fout.get_splits(tiles, ["train", "val"])
+
+        # The values of a string field of the images
+        splits = fout.get_splits(tiles, split_field="split")
+
+        # A random split of the images
+        splits = fout.get_splits(tiles, {"train": 0.8, "val": 0.2}, seed=51)
+
+    Args:
+        tiles_view: a :class:`fiftyone.core.tiles.TilesView`
+        splits (None): a list of split names, or a dict mapping split names
+            to fractions for a random split
+        split_field (None): the field of the source images that holds their
+            splits, if ``splits`` is not a dict
+        seed (None): the random seed of a random split
+
+    Returns:
+        a dict mapping the split names, in order, to the lists of the IDs of
+        their source images (the ``sample_id`` of their tiles). An image
+        whose list field contains several of the splits is in each of them,
+        and an image in none of them is in no list
+    """
+    ids = sorted(tiles_view.distinct("sample_id"))
+
+    if isinstance(splits, dict):
+        if split_field is not None:
+            raise ValueError(
+                "A random split (a dict of fractions) does not use "
+                "`split_field`"
+            )
+
+        _validate_split_names(list(splits.keys()))
+        return _random_split(ids, splits, seed)
+
+    if split_field is None:
+        split_field = "tags"
+
+    source = tiles_view._source_collection
+    field = source.get_field(split_field)
+    is_list = isinstance(field, fof.ListField)
+    value_field = field.field if is_list else field
+    if not isinstance(value_field, fof.StringField):
+        raise ValueError(
+            "`split_field` must be a string field or a list of strings field "
+            "of the source images, but found %r: %s" % (split_field, field)
+        )
+
+    image_ids, values = source.select(ids).values(["id", split_field])
+    values = [_parse_split_values(v, is_list) for v in values]
+
+    if splits is None:
+        splits = sorted(set().union(*values))
+    elif etau.is_str(splits):
+        splits = [splits]
+    else:
+        splits = list(splits)
+
+    _validate_split_names(splits)
+
+    split_ids = OrderedDict((name, []) for name in splits)
+    for _id, _values in zip(image_ids, values):
+        for value in _values:
+            if value in split_ids:
+                split_ids[value].append(_id)
+
+    return split_ids
 
 
 def clip_label(
@@ -433,6 +597,223 @@ def clip_label(
         return _crop_dense_label(label, "map", tile, frame_size, mask_dir)
 
     return label.copy()
+
+
+def _parse_split_values(value, is_list):
+    if value is None:
+        return set()
+
+    if is_list:
+        return set(v for v in value if v is not None)
+
+    return {value}
+
+
+def _validate_split_names(names):
+    if not names:
+        raise ValueError("No splits provided")
+
+    if len(set(names)) < len(names):
+        raise ValueError("Split names must be unique, but found %s" % names)
+
+    for name in names:
+        if (
+            not etau.is_str(name)
+            or name in ("", ".", "..")
+            or "/" in name
+            or os.sep in name
+        ):
+            raise ValueError(
+                "Split names must be non-empty strings that are valid "
+                "directory names, but found %r" % (name,)
+            )
+
+
+def _random_split(ids, split_fracs, seed):
+    """Splits the IDs randomly; mirrors
+    :meth:`fiftyone.utils.random.random_split`, from IDs sorted so that the
+    split does not depend on the order of the images.
+    """
+    names = list(split_fracs.keys())
+    fracs = np.array(list(split_fracs.values()), dtype=float)
+    if (fracs < 0).any() or not fracs.sum() > 0:
+        raise ValueError(
+            "Split fractions must be non-negative and not all zero, but "
+            "found %s" % dict(split_fracs)
+        )
+
+    ids = np.array(ids, dtype=object)
+    rs = np.random.RandomState(seed=seed)  # pylint: disable=no-member
+    rs.shuffle(ids)
+
+    threshs = np.round(len(ids) * np.cumsum(fracs) / fracs.sum()).astype(int)
+    parts = np.split(ids, threshs[:-1])
+
+    return OrderedDict(
+        (name, [str(_id) for _id in part]) for name, part in zip(names, parts)
+    )
+
+
+def _validate_split_export(
+    export_dir, data_path, labels_path, dataset_exporter, kwargs
+):
+    if dataset_exporter is not None:
+        raise ValueError(
+            "Splits are exported by one exporter each, so they require "
+            "`dataset_type` rather than `dataset_exporter`"
+        )
+
+    if export_dir is None:
+        raise ValueError("Splits require `export_dir`")
+
+    if data_path is not None or labels_path is not None:
+        raise ValueError(
+            "Splits are exported to their own locations in `export_dir`, so "
+            "they do not take `data_path` or `labels_path`"
+        )
+
+    if "split" in kwargs:
+        raise ValueError("Provide either `splits` or `split`, not both")
+
+
+def _get_export_splits(tiles_view, splits, split_field, seed):
+    """The splits to export: those of :meth:`get_splits`, which must not
+    share images.
+    """
+    split_ids = get_splits(
+        tiles_view, splits=splits, split_field=split_field, seed=seed
+    )
+
+    counts = Counter(_id for ids in split_ids.values() for _id in ids)
+    num_shared = sum(1 for c in counts.values() if c > 1)
+    if num_shared:
+        raise ValueError(
+            "%d image(s) are in more than one of the splits %s, whose tiles "
+            "would be in several splits" % (num_shared, list(split_ids))
+        )
+
+    num_images = len(tiles_view.distinct("sample_id"))
+    num_unassigned = num_images - len(counts)
+    if num_unassigned:
+        logger.info(
+            "Skipping the tiles of %d of %d image(s), which are in none of "
+            "the splits %s",
+            num_unassigned,
+            num_images,
+            list(split_ids),
+        )
+
+    return split_ids
+
+
+def _export_splits(
+    export_view,
+    split_ids,
+    export_dir,
+    dataset_type,
+    label_field,
+    overwrite,
+    progress,
+    kwargs,
+):
+    """Exports the materialized tiles in splits, and returns the number of
+    tiles in each.
+    """
+    import fiftyone.types as foty
+
+    if dataset_type is not None and not isinstance(dataset_type, type):
+        dataset_type = type(dataset_type)
+
+    if dataset_type is None:
+        raise ValueError("Splits require `dataset_type`")
+
+    # Each split is exported into the export directory, so it is deleted
+    # once, before the first split
+    if overwrite and os.path.isdir(export_dir):
+        etau.delete_dir(export_dir)
+
+    if "classes" not in kwargs and _takes_classes(dataset_type):
+        classes = _get_split_classes(export_view, label_field)
+        if classes is not None:
+            kwargs["classes"] = classes
+
+    split_views = OrderedDict(
+        (name, export_view.match(F("tile.sample_id").is_in(ids)))
+        for name, ids in split_ids.items()
+    )
+    counts = OrderedDict(
+        (name, len(view)) for name, view in split_views.items()
+    )
+
+    if issubclass(dataset_type, foty.FiftyOneDataset):
+        for name, view in split_views.items():
+            view.tag_samples(name)
+
+        export_view.export(
+            export_dir=export_dir,
+            dataset_type=dataset_type,
+            label_field=label_field,
+            progress=progress,
+            **kwargs,
+        )
+        return counts
+
+    for name, view in split_views.items():
+        if not counts[name]:
+            logger.info("Skipping split '%s', which has no tiles", name)
+            continue
+
+        if issubclass(dataset_type, foty.YOLOv5Dataset):
+            split_kwargs = dict(export_dir=export_dir, split=name)
+        else:
+            split_kwargs = dict(export_dir=os.path.join(export_dir, name))
+
+        logger.info("Exporting split '%s' (%d tile(s))", name, counts[name])
+        view.export(
+            dataset_type=dataset_type,
+            label_field=label_field,
+            progress=progress,
+            **split_kwargs,
+            **kwargs,
+        )
+
+    return counts
+
+
+def _takes_classes(dataset_type):
+    try:
+        exporter_cls = dataset_type().get_dataset_exporter_cls()
+    except Exception:
+        return False
+
+    return "classes" in inspect.signature(exporter_cls).parameters
+
+
+def _get_split_classes(export_view, label_field):
+    """The classes of a label field across all the splits: the field's
+    classes, the default classes, or else the labels of all the tiles.
+    """
+    if not etau.is_str(label_field):
+        return None
+
+    classes = export_view.classes.get(label_field) or (
+        export_view.default_classes
+    )
+    if classes:
+        return list(classes)
+
+    doc_type = getattr(
+        export_view.get_field(label_field), "document_type", None
+    )
+    list_field = getattr(doc_type, "_LABEL_LIST_FIELD", None)
+    if list_field is not None:
+        path = "%s.%s.label" % (label_field, list_field)
+    elif doc_type is not None and "label" in getattr(doc_type, "_fields", {}):
+        path = "%s.label" % label_field
+    else:
+        return None
+
+    return export_view.distinct(path)
 
 
 def _get_truncated_convention(dataset_type, dataset_exporter):

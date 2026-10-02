@@ -165,7 +165,8 @@ CVAT image, FiftyOne image detection, image segmentation directory, image
 classification directory tree, FiftyOne dataset, or images only), a label field
 of a type that the format exports, an export directory, what to do with
 negative tiles (without labels), `join_polygon_parts` for polyline fields, the
-YOLOv5 split, and whether to delete the directory first.
+splits (or the YOLOv5 split of all the tiles), and whether to delete the
+directory first.
 
 The choices for negative tiles depend on the format: the formats with a label
 file per image (YOLOv5, YOLOv4, KITTI) offer all three (exported with empty
@@ -180,3 +181,49 @@ class indices stay the same across the splits and tilings exported. A summary
 shows the number of tiles and images, the tiles without labels, and the
 classes. The export runs immediately or as a delegated operation, and reports
 its progress in two phases (cropping, then writing).
+
+## Splits
+
+`export(splits=..., split_field=..., seed=...)` exports the tiles in splits,
+such as `train` and `val`, in one call. Splits are assigned per source image,
+never per tile: the tiles of one image share their scene, overlap when the
+stride is smaller than the tiles, and clipping can put parts of one object in
+several tiles, so splitting tiles would leak validation data into training.
+
+`fiftyone.utils.tiles.get_splits()` assigns the images of a tiles view, by
+their `sample_id`, since tiles keep the tags their images had when the view was
+created but not later changes:
+
+- **Sample tags**, or any list of strings field: `splits=["train", "val"]`. An
+  image with several of the tags is in each of those splits, which the export
+  refuses
+- **A string field**: `split_field="split"`, each value a split, all of them by
+  default
+- **Random**: `splits={"train": 0.8, "val": 0.2}` and `seed`, in the
+  proportions given, normalized to sum to 1. Like
+  `fiftyone.utils.random.random_split()`, but from the image IDs sorted, so
+  that the split does not depend on the order of the view
+
+The tiles of images in no split are not exported. The tiles are materialized
+once; each split is then exported from them:
+
+- **YOLOv5**: with the exporter's own `split`, into `images/<split>/` and
+  `labels/<split>/`, listed in one `dataset.yaml`
+- **FiftyOne dataset**: in one export, each tile tagged with its split
+- **Other formats**: into `<export_dir>/<split>/`, with the format's usual
+  layout, as in FiftyOne's zoo (`coco-2017/train/labels.json`), so that each
+  split loads with `Dataset.from_dir(..., tags=split)`
+
+Formats whose exporters take `classes` get the classes of all the splits, so
+that the splits agree on class indices and COCO category IDs. `overwrite`
+deletes the export directory once, before the first split. Splits replace
+`data_path`, `labels_path`, `dataset_exporter`, and YOLOv5's `split`.
+
+The operator's "Splits" choice offers none (the YOLOv5 split of all the tiles),
+sample tags (proposing the `train`, `val`, `validation`, and `test` tags the
+images have), a string field of the images, or a random split (fractions for
+`train`, `val`, and `test`, and a seed). After a random split, it can tag the
+images with their split, replacing their `train`, `val`, and `test` tags, so
+that the split can be reused as sample tags. The summary lists the tiles and
+images per split and the images in no split; an image in several splits makes
+the form invalid. The progress bar splits its writing half among the exports.
