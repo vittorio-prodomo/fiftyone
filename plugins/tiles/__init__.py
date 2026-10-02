@@ -6,8 +6,10 @@ Tiles view operators.
 |
 """
 
-from collections import Counter
+from collections import Counter, namedtuple
 
+import fiftyone as fo
+import fiftyone.core.labels as fol
 import fiftyone.core.media as fom
 import fiftyone.core.stages as fosg
 import fiftyone.core.tiles as fot
@@ -22,6 +24,93 @@ _PERCENT = "%"
 # Encodes an image's (width, height) as one number, to count distinct sizes
 # in a single aggregation
 _SIZE_KEY = 1_000_000
+
+_ExportFormat = namedtuple(
+    "_ExportFormat", ["label", "dataset_type", "label_types", "uses_classes"]
+)
+
+# The formats that the Export tiles form offers; tiles views export to every
+# format from Python. Formats without label types export no label field
+_EXPORT_FORMATS = {
+    "yolov5": _ExportFormat(
+        "YOLOv5 (Ultralytics)",
+        fo.types.YOLOv5Dataset,
+        (fol.Detections, fol.Polylines),
+        True,
+    ),
+    "yolov4": _ExportFormat(
+        "YOLOv4 (Darknet)",
+        fo.types.YOLOv4Dataset,
+        (fol.Detections, fol.Polylines),
+        True,
+    ),
+    "coco": _ExportFormat(
+        "COCO",
+        fo.types.COCODetectionDataset,
+        (fol.Detections, fol.Polylines, fol.Keypoints),
+        True,
+    ),
+    "voc": _ExportFormat(
+        "Pascal VOC", fo.types.VOCDetectionDataset, (fol.Detections,), False
+    ),
+    "kitti": _ExportFormat(
+        "KITTI", fo.types.KITTIDetectionDataset, (fol.Detections,), False
+    ),
+    "cvat": _ExportFormat(
+        "CVAT image",
+        fo.types.CVATImageDataset,
+        (fol.Detections, fol.Polylines, fol.Keypoints),
+        False,
+    ),
+    "fiftyone_detection": _ExportFormat(
+        "FiftyOne image detection",
+        fo.types.FiftyOneImageDetectionDataset,
+        (fol.Detections,),
+        False,
+    ),
+    "segmentation": _ExportFormat(
+        "Image segmentation directory",
+        fo.types.ImageSegmentationDirectory,
+        (fol.Segmentation, fol.Detections, fol.Polylines),
+        False,
+    ),
+    "classification": _ExportFormat(
+        "Image classification directory tree",
+        fo.types.ImageClassificationDirectoryTree,
+        (fol.Classification,),
+        False,
+    ),
+    "fiftyone": _ExportFormat(
+        "FiftyOne dataset (all fields)", fo.types.FiftyOneDataset, (), False
+    ),
+    "images": _ExportFormat("Images only", fo.types.ImageDirectory, (), False),
+}
+
+_DEFAULT_FORMAT = "yolov5"
+
+_EMPTY_TILES_CHOICES = (
+    (
+        "keep",
+        "Keep, with empty labels",
+        "Exported with empty labels, such as empty label files in YOLO, "
+        "which trainers use as background images",
+    ),
+    (
+        "keep_without_labels",
+        "Keep, without labels",
+        "Exported without labels, such as no label files in YOLO. "
+        "Ultralytics and Darknet still train on them as background images",
+    ),
+    (
+        "skip",
+        "Skip",
+        "Not exported, which is the way to leave them out of training",
+    ),
+)
+
+_YOLO_SPLITS = ("train", "val", "test")
+
+_MAX_CLASSES_SHOWN = 8
 
 
 class PreviewTiling(foo.Operator):
@@ -409,5 +498,318 @@ def _format_percent(part, total):
     return "%.1f%%" % percent
 
 
+class ExportTiles(foo.Operator):
+    @property
+    def config(self):
+        return foo.OperatorConfig(
+            name="export_tiles",
+            label="Export tiles",
+            description=(
+                "Exports the tiles of the current tiles view as images, "
+                "with their labels clipped to the tiles"
+            ),
+            dynamic=True,
+            icon="file_download",
+            allow_immediate_execution=True,
+            allow_delegated_execution=True,
+            default_choice_to_delegated=False,
+        )
+
+    def resolve_placement(self, ctx):
+        if not _is_tiles_view(ctx):
+            return None
+
+        return types.Placement(
+            types.Places.SAMPLES_GRID_ACTIONS,
+            types.Button(
+                label="Export tiles", icon="file_download", prompt=True
+            ),
+        )
+
+    def resolve_input(self, ctx):
+        inputs = types.Object()
+        view = types.View(label="Export tiles")
+
+        if not _is_tiles_view(ctx):
+            prop = inputs.str(
+                "not_tiles",
+                label=(
+                    "Export tiles works on tiles views: use Preview tiling "
+                    "first"
+                ),
+                view=types.Warning(),
+            )
+            prop.invalid = True
+            return types.Property(inputs, view=view)
+
+        format_choices = types.Dropdown()
+        for key, fmt in _EXPORT_FORMATS.items():
+            format_choices.add_choice(key, label=fmt.label)
+
+        inputs.enum(
+            "format",
+            format_choices.values(),
+            required=True,
+            default=_DEFAULT_FORMAT,
+            label="Format",
+            view=format_choices,
+        )
+        fmt = _EXPORT_FORMATS[ctx.params.get("format") or _DEFAULT_FORMAT]
+
+        label_field = None
+        if fmt.label_types:
+            fields = _get_export_fields(ctx, fmt)
+            if not fields:
+                prop = inputs.str(
+                    "no_fields",
+                    label=(
+                        "The tiles have no %s field to export in this format"
+                        % " or ".join(t.__name__ for t in fmt.label_types)
+                    ),
+                    view=types.Warning(),
+                )
+                prop.invalid = True
+                return types.Property(inputs, view=view)
+
+            field_choices = types.Dropdown()
+            for field in fields:
+                field_choices.add_choice(field, label=field)
+
+            inputs.enum(
+                "label_field",
+                field_choices.values(),
+                required=True,
+                default=fields[0],
+                label="Label field",
+                view=field_choices,
+            )
+            label_field = ctx.params.get("label_field")
+            if label_field not in fields:
+                label_field = fields[0]
+
+        inputs.file(
+            "export_dir",
+            required=True,
+            label="Export directory",
+            description="The directory in which to write the tiles",
+            view=types.FileExplorerView(
+                choose_dir=True, button_label="Choose a directory..."
+            ),
+        )
+
+        if label_field is not None:
+            empty_choices = types.RadioGroup()
+            for value, label, description in _EMPTY_TILES_CHOICES:
+                empty_choices.add_choice(
+                    value, label=label, description=description
+                )
+
+            inputs.enum(
+                "empty_tiles",
+                empty_choices.values(),
+                default="keep",
+                label="Tiles without labels",
+                description=(
+                    "Tiles without labels in %s, because none of their "
+                    "image's labels touch them or clipping removed them all"
+                    % label_field
+                ),
+                view=empty_choices,
+            )
+
+            if _is_polylines_field(ctx, label_field):
+                inputs.bool(
+                    "join_polygon_parts",
+                    default=False,
+                    label="Join polygon parts",
+                    description=(
+                        "Keep a polygon that a tile cuts into several parts "
+                        "as one polygon, its parts joined along the tile's "
+                        "border, rather than one polygon per part"
+                    ),
+                )
+
+        if fmt.dataset_type is fo.types.YOLOv5Dataset:
+            split_choices = types.Dropdown()
+            for split in _YOLO_SPLITS:
+                split_choices.add_choice(split, label=split)
+
+            inputs.enum(
+                "split",
+                split_choices.values(),
+                default="train",
+                label="Split",
+                description=(
+                    "Export each split separately into the same directory "
+                    "to build a YOLOv5 dataset"
+                ),
+                view=split_choices,
+            )
+
+        inputs.bool(
+            "overwrite",
+            default=False,
+            label="Delete the export directory first",
+            description=(
+                "By default, the export is merged into the directory, as "
+                "when exporting several splits"
+            ),
+        )
+
+        summary = _summarize_export(ctx, fmt, label_field)
+        if summary:
+            inputs.md(summary, name="summary")
+
+        return types.Property(inputs, view=view)
+
+    def execute(self, ctx):
+        fmt = _EXPORT_FORMATS[ctx.params.get("format") or _DEFAULT_FORMAT]
+        export_dir = _get_export_dir(ctx.params)
+        if not export_dir:
+            raise ValueError("Choose an export directory")
+
+        kwargs = {
+            "export_dir": export_dir,
+            "dataset_type": fmt.dataset_type,
+            "overwrite": bool(ctx.params.get("overwrite", False)),
+        }
+
+        if fmt.label_types:
+            label_field = ctx.params.get("label_field")
+            if label_field not in _get_export_fields(ctx, fmt):
+                raise ValueError("Choose a label field to export")
+
+            kwargs["label_field"] = label_field
+            kwargs["empty_tiles"] = ctx.params.get("empty_tiles") or "keep"
+            kwargs["join_polygon_parts"] = bool(
+                ctx.params.get("join_polygon_parts", False)
+            )
+
+            if fmt.uses_classes:
+                classes = _get_classes(ctx, label_field)
+                if classes:
+                    kwargs["classes"] = classes
+
+        if fmt.dataset_type is fo.types.YOLOv5Dataset:
+            kwargs["split"] = ctx.params.get("split") or "train"
+
+        num_tiles = ctx.view.export(progress=_ExportProgress(ctx), **kwargs)
+
+        return {"num_tiles": num_tiles, "export_dir": export_dir}
+
+    def resolve_output(self, ctx):
+        outputs = types.Object()
+        outputs.int("num_tiles", label="Tiles exported")
+        outputs.str("export_dir", label="Export directory")
+        return types.Property(outputs, view=types.View(label="Export tiles"))
+
+
+class _ExportProgress(object):
+    """Reports the progress of a tiles export, which first crops the tiles
+    and then writes them.
+    """
+
+    _PHASES = ("Cropping the tiles", "Writing the export")
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+        self._bars = []
+
+    def __call__(self, pb):
+        if not self._bars or self._bars[-1] is not pb:
+            self._bars.append(pb)
+
+        phase = min(len(self._bars), len(self._PHASES)) - 1
+        progress = (phase + (pb.progress or 0)) / len(self._PHASES)
+        self._ctx.set_progress(progress=progress, label=self._PHASES[phase])
+
+
+def _is_tiles_view(ctx):
+    return ctx.dataset is not None and isinstance(ctx.view, fot.TilesView)
+
+
+def _get_export_fields(ctx, fmt):
+    """The top-level fields of the tiles view that the format can export."""
+    schema = ctx.view.get_field_schema(embedded_doc_type=fmt.label_types)
+    return [f for f in schema if f != fot.TILE_FIELD]
+
+
+def _is_polylines_field(ctx, field):
+    doc_type = getattr(ctx.view.get_field(field), "document_type", None)
+    return doc_type is not None and issubclass(doc_type, fol.Polylines)
+
+
+def _get_export_dir(params):
+    export_dir = params.get("export_dir")
+    if isinstance(export_dir, dict):
+        export_dir = export_dir.get("absolute_path")
+
+    return export_dir or None
+
+
+def _get_classes(ctx, label_field):
+    """The classes of a label field of the whole source dataset, so that
+    class indices do not change across the splits or tilings exported.
+    """
+    dataset = ctx.dataset
+    classes = dataset.classes.get(label_field) or dataset.default_classes
+    if classes:
+        return list(classes)
+
+    doc_type = getattr(dataset.get_field(label_field), "document_type", None)
+    list_field = getattr(doc_type, "_LABEL_LIST_FIELD", None)
+    if list_field is None:
+        return None
+
+    return dataset.distinct("%s.%s.label" % (label_field, list_field))
+
+
+def _summarize_export(ctx, fmt, label_field):
+    """A markdown summary of what the export writes."""
+    num_tiles = len(ctx.view)
+    lines = [
+        "**%s tile(s)** of %s image(s)"
+        % (
+            "{:,}".format(num_tiles),
+            "{:,}".format(len(ctx.view.distinct("sample_id"))),
+        )
+    ]
+
+    if label_field is not None:
+        has_labels = _has_labels_expr(ctx.view, label_field)
+        num_empty = num_tiles - ctx.view.match(has_labels).count()
+        lines.append(
+            "%s tile(s) have no labels in `%s`; clipping may leave a few "
+            "more without labels" % ("{:,}".format(num_empty), label_field)
+        )
+
+    if fmt.uses_classes and label_field is not None:
+        classes = _get_classes(ctx, label_field)
+        if classes:
+            shown = ", ".join(
+                "%d `%s`" % (i, c)
+                for i, c in enumerate(classes[:_MAX_CLASSES_SHOWN])
+            )
+            if len(classes) > _MAX_CLASSES_SHOWN:
+                shown += ", and %d more" % (len(classes) - _MAX_CLASSES_SHOWN)
+
+            lines.append(
+                "%d classes, from the whole dataset so that their indices do "
+                "not change across exports: %s" % (len(classes), shown)
+            )
+
+    return "\n\n".join(lines)
+
+
+def _has_labels_expr(view, label_field):
+    doc_type = getattr(view.get_field(label_field), "document_type", None)
+    list_field = getattr(doc_type, "_LABEL_LIST_FIELD", None)
+    if list_field is not None:
+        return F("%s.%s" % (label_field, list_field)).length() > 0
+
+    return F(label_field) != None
+
+
 def register(p):
     p.register(PreviewTiling)
+    p.register(ExportTiles)

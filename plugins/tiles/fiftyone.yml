@@ -1,7 +1,8 @@
 name: "@vittorio-prodomo/tiles"
-description: Preview how a dataset looks when split into fixed-size tiles
+description: Preview how a dataset looks when split into fixed-size tiles, and export the tiles
 version: 1.0.0
 fiftyone:
   version: "*"
 operators:
   - preview_tiling
+  - export_tiles

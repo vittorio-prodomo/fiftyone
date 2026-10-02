@@ -119,6 +119,9 @@ class TilesView(fop.PatchesView):
                 label_field="ground_truth",
                 empty_tiles="skip",
             )
+
+        Returns:
+            the number of tiles exported
         """
         import fiftyone.utils.tiles as fout
 

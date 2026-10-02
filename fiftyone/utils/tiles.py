@@ -63,6 +63,7 @@ def materialize_tiles(
     image_format=None,
     tile_field="tile",
     join_polygon_parts=False,
+    truncated=None,
     name=None,
     persistent=False,
     progress=None,
@@ -105,6 +106,9 @@ def materialize_tiles(
             that a tile cuts into several parts as one shape, whose parts are
             joined by zero-area edges along the tile's border, rather than
             one shape per part. See :meth:`clip_label`
+        truncated (None): whether to also add a ``truncated`` attribute to
+            the detections that a tile cuts and that have none, as a
+            ``"flag"`` or a ``"fraction"``. See :meth:`clip_label`
         name (None): a name for the dataset
         persistent (False): whether the dataset should persist in the
             database after the session terminates
@@ -118,6 +122,12 @@ def materialize_tiles(
     if not isinstance(tiles_view, fot.TilesView):
         raise ValueError(
             "Expected a %s, but found %s" % (fot.TilesView, type(tiles_view))
+        )
+
+    if truncated not in (None, "flag", "fraction"):
+        raise ValueError(
+            "`truncated` must be None, 'flag', or 'fraction', but found %r"
+            % (truncated,)
         )
 
     fields = _parse_fields(tiles_view, fields, tile_field)
@@ -146,6 +156,7 @@ def materialize_tiles(
         image_format,
         tile_field,
         join_polygon_parts,
+        truncated,
     )
     dataset.add_samples(samples, num_samples=len(view), progress=progress)
 
@@ -176,6 +187,10 @@ def export_tiles(
     destination. This works with any exporter of image datasets, in any
     format: see :meth:`fiftyone.core.collections.SampleCollection.export`
     for the arguments.
+
+    Detections that a tile cuts get a ``truncated`` attribute in the formats
+    that have one: ``1`` in VOC, and the fraction of the box outside the tile
+    in KITTI. See :meth:`clip_label`.
 
     Because the tile images are new files, ``export_media`` can only be
     ``True`` or ``"move"``. To export tiles with other media options, such
@@ -230,6 +245,9 @@ def export_tiles(
             one shape per part. See :meth:`clip_label`
         **kwargs: optional keyword arguments to pass to the dataset
             exporter's constructor
+
+    Returns:
+        the number of tiles exported
     """
     if empty_tiles not in _EMPTY_TILES:
         raise ValueError(
@@ -284,6 +302,9 @@ def export_tiles(
             tmp_dir,
             rel_dir=rel_dir,
             join_polygon_parts=join_polygon_parts,
+            truncated=_get_truncated_convention(
+                dataset_type, dataset_exporter
+            ),
             progress=progress,
         )
 
@@ -298,6 +319,7 @@ def export_tiles(
         if dataset_exporter is None:
             kwargs["export_media"] = "move"
 
+        num_exported = len(export_view)
         export_view.export(
             export_dir=export_dir,
             dataset_type=dataset_type,
@@ -317,9 +339,16 @@ def export_tiles(
 
         etau.delete_dir(tmp_dir)
 
+    return num_exported
+
 
 def clip_label(
-    label, tile, frame_size, mask_dir=None, join_polygon_parts=False
+    label,
+    tile,
+    frame_size,
+    mask_dir=None,
+    join_polygon_parts=False,
+    truncated=None,
 ):
     """Clips a label to a tile of its image and re-normalizes it to the
     tile.
@@ -328,7 +357,10 @@ def clip_label(
 
     -   :class:`fiftyone.core.labels.Detection`: the bounding box is
         intersected with the tile, and the instance mask, if any, is cropped
-        accordingly
+        accordingly. If the tile cuts the box, its ``truncated`` attribute,
+        if any, is updated: to ``True`` or ``1`` if it is a flag (as in VOC),
+        and to account for the part outside the tile if it is a fraction (as
+        in KITTI)
     -   :class:`fiftyone.core.labels.Polyline`: filled shapes are clipped as
         polygons, along the tile's borders where they leave it. A shape that
         the tile cuts into several parts becomes one shape per part, unless
@@ -356,6 +388,10 @@ def clip_label(
             tile cuts into several parts as one shape, whose parts are joined
             by zero-area edges along the tile's border (True), rather than
             one shape per part (False)
+        truncated (None): whether to also add a ``truncated`` attribute to
+            the detections that the tile cuts and that have none: ``"flag"``
+            sets it to ``1``, as in VOC, and ``"fraction"`` to the fraction
+            of the box outside the tile, as in KITTI
 
     Returns:
         a new :class:`fiftyone.core.labels.Label`, or ``None`` if no part of
@@ -371,6 +407,7 @@ def clip_label(
                 frame_size,
                 mask_dir=mask_dir,
                 join_polygon_parts=join_polygon_parts,
+                truncated=truncated,
             )
             if _label is not None:
                 clipped.append(_label)
@@ -380,7 +417,7 @@ def clip_label(
         return label
 
     if isinstance(label, fol.Detection):
-        return _clip_detection(label, tile, frame_size, mask_dir)
+        return _clip_detection(label, tile, frame_size, mask_dir, truncated)
 
     if isinstance(label, fol.Polyline):
         return _clip_polyline(label, tile, frame_size, join_polygon_parts)
@@ -395,6 +432,39 @@ def clip_label(
         return _crop_dense_label(label, "map", tile, frame_size, mask_dir)
 
     return label.copy()
+
+
+def _get_truncated_convention(dataset_type, dataset_exporter):
+    """The convention of the ``truncated`` attribute of the export format,
+    for the formats that export it: VOC (a flag) and KITTI (a fraction).
+    """
+    import fiftyone.types as foty
+    import fiftyone.utils.kitti as fouk
+    import fiftyone.utils.voc as fouv
+
+    if dataset_exporter is not None:
+        if isinstance(dataset_exporter, fouk.KITTIDetectionDatasetExporter):
+            return "fraction"
+
+        if isinstance(dataset_exporter, fouv.VOCDetectionDatasetExporter):
+            return "flag"
+
+        return None
+
+    if dataset_type is not None and not isinstance(dataset_type, type):
+        dataset_type = type(dataset_type)
+
+    if dataset_type is not None and issubclass(
+        dataset_type, foty.KITTIDetectionDataset
+    ):
+        return "fraction"
+
+    if dataset_type is not None and issubclass(
+        dataset_type, foty.VOCDetectionDataset
+    ):
+        return "flag"
+
+    return None
 
 
 def _handle_empty_tiles(dataset, label_fields, empty_tiles, num_tiles):
@@ -552,6 +622,7 @@ def _iter_tile_samples(
     image_format,
     tile_field,
     join_polygon_parts,
+    truncated,
 ):
     filename_maker = fou.UniqueFilenameMaker(
         output_dir=output_dir, rel_dir=rel_dir, ignore_existing=True
@@ -597,6 +668,7 @@ def _iter_tile_samples(
                     frame_size,
                     mask_dir=mask_dir,
                     join_polygon_parts=join_polygon_parts,
+                    truncated=truncated,
                 )
 
             sample[field] = value
@@ -693,7 +765,7 @@ def _write_image(img, path):
         img.save(path)
 
 
-def _clip_detection(detection, tile, frame_size, mask_dir):
+def _clip_detection(detection, tile, frame_size, mask_dir, truncated):
     box = detection.bounding_box
     if not _is_valid_box(box):
         return None
@@ -728,7 +800,41 @@ def _clip_detection(detection, tile, frame_size, mask_dir):
 
         _crop_mask(detection, clipped, "mask", crop, mask_dir)
 
+    area = (x2 - x1) * (y2 - y1)
+    if area > 0:
+        visible = (cx2 - cx1) * (cy2 - cy1) / area
+        if visible < 1 - fot._EPS:
+            _update_truncated(clipped, visible, truncated)
+
     return clipped
+
+
+def _update_truncated(detection, visible, truncated):
+    """Updates the ``truncated`` attribute of a detection that a tile cuts,
+    of which ``visible`` is the fraction of its box inside the tile.
+    """
+    if truncated not in (None, "flag", "fraction"):
+        raise ValueError(
+            "`truncated` must be None, 'flag', or 'fraction', but found %r"
+            % (truncated,)
+        )
+
+    value = detection.get_attribute_value("truncated", None)
+    if isinstance(value, bool):
+        value = True
+    elif isinstance(value, int):
+        value = 1
+    elif isinstance(value, float):
+        # The object was already that much outside its image
+        value = 1 - (1 - value) * visible
+    elif value is None and truncated == "flag":
+        value = 1
+    elif value is None and truncated == "fraction":
+        value = 1 - visible
+    else:
+        return
+
+    detection["truncated"] = value
 
 
 def _is_valid_box(box):

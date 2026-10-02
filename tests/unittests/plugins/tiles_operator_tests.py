@@ -1,5 +1,5 @@
 """
-Preview tiling operator unit tests.
+Tiles plugin operator unit tests.
 
 | Copyright 2017-2026, Voxel51, Inc.
 | `voxel51.com <https://voxel51.com/>`_
@@ -7,6 +7,7 @@ Preview tiling operator unit tests.
 """
 
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -20,7 +21,7 @@ from fiftyone import ViewField as F
 from fiftyone.operators.executor import ExecutionContext, Executor
 
 from decorators import drop_datasets
-from plugins.tiles import PreviewTiling, _parse_params
+from plugins.tiles import ExportTiles, PreviewTiling, _parse_params
 
 
 def _ctx(dataset, view=None, **params):
@@ -35,8 +36,9 @@ def _ctx(dataset, view=None, **params):
     )
 
 
-def _inputs(ctx):
-    return PreviewTiling().resolve_input(ctx).type.properties
+def _inputs(ctx, operator=None):
+    operator = operator or PreviewTiling()
+    return operator.resolve_input(ctx).type.properties
 
 
 def _dataset(*sizes):
@@ -274,6 +276,161 @@ class PreviewTilingTests(unittest.TestCase):
         )
         # 1000x500 -> 5 x 3; 400x300 -> 2 x 2
         self.assertEqual(len(_set_view(ctx)), 15 + 4)
+
+
+class ExportTilesTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _dataset(self):
+        """Two 1000x500 images cut into 600x500 tiles at x=0 and x=400."""
+        dataset = fo.Dataset()
+        for i, labels in enumerate(
+            (
+                [fo.Detection(label="cat", bounding_box=[0.1, 0.1, 0.1, 0.2])],
+                [fo.Detection(label="dog", bounding_box=[0.8, 0.1, 0.1, 0.2])],
+            )
+        ):
+            path = os.path.join(self.tmp, "src", "img%d.png" % i)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            Image.fromarray(np.zeros((500, 1000, 3), dtype=np.uint8)).save(
+                path
+            )
+            dataset.add_sample(
+                fo.Sample(
+                    filepath=path,
+                    gt=fo.Detections(detections=labels),
+                    polys=fo.Polylines(),
+                    weather=fo.Classification(label="sunny"),
+                )
+            )
+
+        dataset.compute_metadata()
+        return dataset
+
+    def _ctx(self, dataset, view, **params):
+        request_params = {
+            "dataset_name": dataset.name,
+            "view": view._serialize(),
+            "params": params,
+        }
+        return ExecutionContext(
+            operator_uri="@vittorio-prodomo/tiles/export_tiles",
+            request_params=request_params,
+            executor=Executor(),
+        )
+
+    @drop_datasets
+    def test_placement_is_only_for_tiles_views(self):
+        dataset = self._dataset()
+        operator = ExportTiles()
+        self.assertIsNone(
+            operator.resolve_placement(self._ctx(dataset, dataset.view()))
+        )
+        tiles = dataset.to_tiles((600, 600))
+        self.assertIsNotNone(
+            operator.resolve_placement(self._ctx(dataset, tiles))
+        )
+
+        inputs = _inputs(self._ctx(dataset, dataset.view()), ExportTiles())
+        self.assertTrue(inputs["not_tiles"].invalid)
+
+    @drop_datasets
+    def test_form(self):
+        dataset = self._dataset()
+        tiles = dataset.to_tiles((600, 600))
+
+        def inputs(**params):
+            return _inputs(self._ctx(dataset, tiles, **params), ExportTiles())
+
+        # YOLOv5 by default, with the fields it can export
+        props = inputs()
+        self.assertEqual(props["format"].default, "yolov5")
+        self.assertEqual(props["label_field"].type.values, ["gt", "polys"])
+        self.assertEqual(
+            props["empty_tiles"].type.values,
+            ["keep", "keep_without_labels", "skip"],
+        )
+        self.assertEqual(props["empty_tiles"].default, "keep")
+        self.assertEqual(props["split"].default, "train")
+        self.assertNotIn("join_polygon_parts", props)
+
+        summary = props["summary"].default
+        self.assertIn("**4 tile(s)** of 2 image(s)", summary)
+        self.assertIn("2 tile(s) have no labels in `gt`", summary)
+        self.assertIn("2 classes", summary)
+        self.assertIn("0 `cat`, 1 `dog`", summary)
+
+        # polylines can join their parts
+        self.assertIn("join_polygon_parts", inputs(label_field="polys"))
+
+        # other formats offer other fields, and no split
+        props = inputs(format="classification")
+        self.assertEqual(props["label_field"].type.values, ["weather"])
+        self.assertNotIn("split", props)
+
+        props = inputs(format="images")
+        self.assertNotIn("label_field", props)
+        self.assertNotIn("empty_tiles", props)
+
+        # no field to export
+        tiles = dataset.exclude_fields("weather").to_tiles((600, 600))
+        props = _inputs(
+            self._ctx(dataset, tiles, format="classification"), ExportTiles()
+        )
+        self.assertTrue(props["no_fields"].invalid)
+
+    @drop_datasets
+    def test_execute(self):
+        dataset = self._dataset()
+        tiles = dataset.to_tiles((600, 600))
+        export_dir = os.path.join(self.tmp, "yolo")
+
+        # the tiles of img1 only have the dog, which keeps index 1
+        view = tiles.match(F("filepath").ends_with("img1.png"))
+        ctx = self._ctx(
+            dataset,
+            view,
+            format="yolov5",
+            label_field="gt",
+            export_dir={"absolute_path": export_dir},
+            empty_tiles="skip",
+            split="val",
+        )
+        result = ExportTiles().execute(ctx)
+
+        self.assertEqual(result["num_tiles"], 1)
+        images = os.listdir(os.path.join(export_dir, "images", "val"))
+        self.assertEqual(images, ["img1_tile_0_1.png"])
+        with open(
+            os.path.join(export_dir, "labels", "val", "img1_tile_0_1.txt")
+        ) as f:
+            self.assertTrue(f.read().startswith("1 "))
+
+        with open(os.path.join(export_dir, "dataset.yaml")) as f:
+            yaml = f.read()
+
+        self.assertIn("0: cat", yaml)
+        self.assertIn("1: dog", yaml)
+
+        # every tile, without labels
+        export_dir = os.path.join(self.tmp, "images")
+        ctx = self._ctx(
+            dataset,
+            tiles,
+            format="images",
+            export_dir={"absolute_path": export_dir},
+        )
+        self.assertEqual(ExportTiles().execute(ctx)["num_tiles"], 4)
+        self.assertEqual(len(os.listdir(export_dir)), 4)
+
+        # an export directory is required
+        ctx = self._ctx(dataset, tiles, format="images")
+        with self.assertRaises(ValueError):
+            ExportTiles().execute(ctx)
 
 
 if __name__ == "__main__":

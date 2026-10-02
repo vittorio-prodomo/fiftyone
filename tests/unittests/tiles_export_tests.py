@@ -149,6 +149,36 @@ class ClipLabelTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_truncated(self):
+        # 300-500 x 200-300: half of it is inside the tile (400-800)
+        def clip(mode=None, **attributes):
+            det = fo.Detection(bounding_box=[0.3, 0.4, 0.2, 0.2], **attributes)
+            clipped = self._clip(det, truncated=mode)
+            return clipped.get_attribute_value("truncated", None)
+
+        # existing flags and fractions are updated, keeping their type
+        self.assertIs(clip(truncated=False), True)
+        self.assertEqual(clip(truncated=0), 1)
+        self.assertIsInstance(clip(truncated=0), int)
+        self.assertAlmostEqual(clip(truncated=0.2), 1 - 0.8 * 0.5)
+
+        # missing ones are only added on request
+        self.assertIsNone(clip())
+        self.assertEqual(clip("flag"), 1)
+        self.assertAlmostEqual(clip("fraction"), 0.5)
+
+        # boxes inside the tile are left as they are
+        det = fo.Detection(bounding_box=[0.5, 0.4, 0.1, 0.1], truncated=0.3)
+        self.assertEqual(
+            self._clip(det, truncated="fraction")["truncated"], 0.3
+        )
+        det = fo.Detection(bounding_box=[0.5, 0.4, 0.1, 0.1])
+        clipped = self._clip(det, truncated="flag")
+        self.assertIsNone(clipped.get_attribute_value("truncated", None))
+
+        with self.assertRaises(ValueError):
+            clip("yes")
+
     def test_random_detections_match_the_intersection(self):
         rng = random.Random(0)
         tile_x, tile_y, tile_w, tile_h = self.TILE
@@ -1201,6 +1231,521 @@ class ExportTilesTests(_TilesDatasetTests):
         self.assertEqual(len(tmp_dirs), 2)
         self.assertFalse(any(os.path.exists(d) for d in tmp_dirs))
         self.assertEqual(set(fo.list_datasets()), datasets)
+
+
+def _stem(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _without_ids(d):
+    """A label dict without IDs, whose NaNs, plain or in extended JSON, are
+    comparable.
+    """
+    if isinstance(d, dict):
+        if d == {"$numberDouble": "NaN"}:
+            return "nan"
+
+        return {k: _without_ids(v) for k, v in d.items() if k != "_id"}
+
+    if isinstance(d, list):
+        return [_without_ids(v) for v in d]
+
+    if isinstance(d, float) and math.isnan(d):
+        return "nan"
+
+    return d
+
+
+def _visible_points(points):
+    return [p for p in points if not any(math.isnan(v) for v in p)]
+
+
+class ExportFormatsTests(_TilesDatasetTests):
+    """Exports a 1000x500 image cut into 600x500 tiles at x=0 and x=400 to
+    each image format, and reads it back with FiftyOne's importers.
+    """
+
+    def _tiles(self):
+        nan_free_mask = np.ones((100, 400), dtype=bool)
+        dataset = self._dataset(
+            {"a.png": _coords_image(1000, 500)},
+            gt=[
+                fo.Detections(
+                    detections=[
+                        fo.Detection(
+                            label="cat", bounding_box=[0.1, 0.1, 0.1, 0.2]
+                        ),
+                        # cut by both tiles, 3/4 of it inside each
+                        fo.Detection(
+                            label="dog", bounding_box=[0.3, 0.2, 0.4, 0.2]
+                        ),
+                    ]
+                )
+            ],
+            instances=[
+                fo.Detections(
+                    detections=[
+                        fo.Detection(
+                            label="dog",
+                            bounding_box=[0.3, 0.2, 0.4, 0.2],
+                            mask=nan_free_mask,
+                        )
+                    ]
+                )
+            ],
+            polys=[
+                fo.Polylines(
+                    polylines=[
+                        fo.Polyline(
+                            label="lot",
+                            points=[
+                                [
+                                    (0.3, 0.6),
+                                    (0.5, 0.6),
+                                    (0.5, 0.8),
+                                    (0.3, 0.8),
+                                ]
+                            ],
+                            closed=True,
+                            filled=True,
+                        )
+                    ]
+                )
+            ],
+            kps=[
+                fo.Keypoints(
+                    keypoints=[
+                        fo.Keypoint(
+                            label="person",
+                            points=[(0.2, 0.5), (0.5, 0.5), (0.9, 0.5)],
+                        )
+                    ]
+                )
+            ],
+            seg=[
+                fo.Segmentation(
+                    mask=np.tile(np.arange(1000) // 100, (500, 1)).astype(
+                        np.uint8
+                    )
+                )
+            ],
+            weather=[fo.Classification(label="sunny")],
+            location=[fo.GeoLocation(point=[-73.9855, 40.758])],
+            score=[0.5],
+        )
+        tiles = dataset.to_tiles((600, 600))
+        expected = {
+            _stem(s.filepath): s
+            for s in tiles.materialize(os.path.join(self.tmp, "expected"))
+        }
+        return tiles, expected
+
+    def _round_trip(
+        self, tiles, expected, dataset_type, export_kwargs=None, **kwargs
+    ):
+        export_dir = os.path.join(self.tmp, dataset_type.__name__)
+        tiles.export(
+            export_dir, dataset_type=dataset_type, **(export_kwargs or {})
+        )
+        imported = fo.Dataset.from_dir(
+            dataset_dir=export_dir, dataset_type=dataset_type, **kwargs
+        )
+        samples = {_stem(s.filepath): s for s in imported}
+        self.assertEqual(sorted(samples), sorted(expected))
+        return samples
+
+    def _assert_detections(self, samples, expected, field, tol_px, src="gt"):
+        for stem, sample in samples.items():
+            actual = sample[field].detections
+            wanted = expected[stem][src].detections
+            self.assertEqual(
+                [d.label for d in actual], [d.label for d in wanted]
+            )
+            for a, e in zip(actual, wanted):
+                np.testing.assert_allclose(
+                    a.bounding_box, e.bounding_box, atol=tol_px / 500
+                )
+
+    def _assert_images(self, samples, expected):
+        for stem, sample in samples.items():
+            np.testing.assert_array_equal(
+                _read(sample.filepath), _read(expected[stem].filepath)
+            )
+
+    @drop_datasets
+    def test_fiftyone_image_detection(self):
+        tiles, expected = self._tiles()
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.FiftyOneImageDetectionDataset,
+            export_kwargs={"label_field": "gt"},
+        )
+        self._assert_detections(samples, expected, "ground_truth", 1e-6)
+        self._assert_images(samples, expected)
+
+    @drop_datasets
+    def test_coco(self):
+        tiles, expected = self._tiles()
+
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.COCODetectionDataset,
+            export_kwargs={"label_field": "gt"},
+            label_types="detections",
+        )
+        self._assert_detections(samples, expected, "ground_truth", 1e-6)
+        self._assert_images(samples, expected)
+
+        # masks, cropped to the visible 300x100px of the dog
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.COCODetectionDataset,
+            export_kwargs={"label_field": "instances"},
+            label_types="segmentations",
+        )
+        self._assert_detections(
+            samples, expected, "ground_truth", 1e-6, src="instances"
+        )
+        for sample in samples.values():
+            (det,) = sample.ground_truth.detections
+            self.assertEqual(det.mask.shape, (100, 300))
+            self.assertGreater(det.mask.mean(), 0.95)
+
+        # polygons
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.COCODetectionDataset,
+            export_kwargs={"label_field": "polys"},
+            label_types="segmentations",
+            use_polylines=True,
+        )
+        for stem, sample in samples.items():
+            (actual,) = sample.ground_truth.polylines
+            (wanted,) = expected[stem].polys.polylines
+            np.testing.assert_allclose(
+                sorted(actual.points[0]),
+                sorted(wanted.points[0]),
+                atol=1 / 500,
+            )
+
+        # keypoints, whose points outside the tile stay hidden
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.COCODetectionDataset,
+            export_kwargs={"label_field": "kps"},
+            label_types="keypoints",
+        )
+        for stem, sample in samples.items():
+            (actual,) = sample.ground_truth.keypoints
+            (wanted,) = expected[stem].kps.keypoints
+            np.testing.assert_allclose(
+                actual.points, wanted.points, atol=1 / 500
+            )
+
+    @drop_datasets
+    def test_voc(self):
+        tiles, expected = self._tiles()
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.VOCDetectionDataset,
+            export_kwargs={"label_field": "gt"},
+        )
+        self._assert_detections(samples, expected, "ground_truth", 1)
+        self._assert_images(samples, expected)
+
+        # VOC flags the boxes that the tiles cut
+        truncated = {
+            stem: [
+                (d.label, d.get_attribute_value("truncated", None))
+                for d in s.ground_truth.detections
+            ]
+            for stem, s in samples.items()
+        }
+        self.assertEqual(
+            truncated,
+            {
+                "a_tile_0_0": [("cat", None), ("dog", 1)],
+                "a_tile_0_1": [("dog", 1)],
+            },
+        )
+
+    @drop_datasets
+    def test_kitti(self):
+        tiles, expected = self._tiles()
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.KITTIDetectionDataset,
+            export_kwargs={"label_field": "gt"},
+        )
+        self._assert_detections(samples, expected, "ground_truth", 1)
+        self._assert_images(samples, expected)
+
+        # KITTI has the fraction of each box outside the tile
+        truncated = {
+            stem: [
+                (d.label, d.get_attribute_value("truncated", None))
+                for d in s.ground_truth.detections
+            ]
+            for stem, s in samples.items()
+        }
+        self.assertEqual(
+            truncated,
+            {
+                "a_tile_0_0": [("cat", 0.0), ("dog", 0.25)],
+                "a_tile_0_1": [("dog", 0.25)],
+            },
+        )
+
+    @drop_datasets
+    def test_yolov4(self):
+        tiles, expected = self._tiles()
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.YOLOv4Dataset,
+            export_kwargs={"label_field": "gt", "classes": ["cat", "dog"]},
+        )
+        self._assert_detections(samples, expected, "ground_truth", 1e-3)
+        self._assert_images(samples, expected)
+
+    @drop_datasets
+    def test_cvat_image(self):
+        tiles, expected = self._tiles()
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.CVATImageDataset,
+            export_kwargs={
+                "label_field": {
+                    "gt": "detections",
+                    "polys": "polylines",
+                    "kps": "keypoints",
+                    "weather": "classifications",
+                }
+            },
+        )
+        self._assert_detections(samples, expected, "detections", 1)
+        self._assert_images(samples, expected)
+        for stem, sample in samples.items():
+            self.assertEqual(
+                sample.classifications.classifications[0].label, "sunny"
+            )
+
+            (actual,) = sample.polylines.polylines
+            (wanted,) = expected[stem].polys.polylines
+            np.testing.assert_allclose(
+                sorted(actual.points[0]),
+                sorted(wanted.points[0]),
+                atol=1 / 500,
+            )
+
+            # CVAT points cannot be hidden, so only the visible ones remain
+            (actual,) = sample.keypoints.keypoints
+            (wanted,) = expected[stem].kps.keypoints
+            np.testing.assert_allclose(
+                actual.points, _visible_points(wanted.points), atol=1 / 500
+            )
+
+    @drop_datasets
+    def test_image_segmentation_directory(self):
+        tiles, expected = self._tiles()
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.ImageSegmentationDirectory,
+            export_kwargs={"label_field": "seg"},
+        )
+        self._assert_images(samples, expected)
+        for stem, sample in samples.items():
+            np.testing.assert_array_equal(
+                sample.ground_truth.get_mask(), expected[stem].seg.get_mask()
+            )
+
+        # x=400 is in class 4
+        self.assertEqual(
+            samples["a_tile_0_1"].ground_truth.get_mask()[0, 0], 4
+        )
+
+    @drop_datasets
+    def test_fiftyone_image_labels(self):
+        tiles, expected = self._tiles()
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.FiftyOneImageLabelsDataset,
+            export_kwargs={
+                "label_field": {
+                    "gt": "detections",
+                    "polys": "polylines",
+                    "kps": "keypoints",
+                }
+            },
+        )
+        self._assert_detections(samples, expected, "detections", 1e-6)
+        self._assert_images(samples, expected)
+        for stem, sample in samples.items():
+            np.testing.assert_allclose(
+                sample.polylines.polylines[0].points,
+                expected[stem].polys.polylines[0].points,
+                atol=1e-9,
+            )
+            np.testing.assert_allclose(
+                sample.keypoints.keypoints[0].points,
+                expected[stem].kps.keypoints[0].points,
+                atol=1e-9,
+            )
+
+    @drop_datasets
+    def test_bdd(self):
+        tiles, expected = self._tiles()
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.BDDDataset,
+            export_kwargs={
+                "label_field": {"gt": "detections", "polys": "polylines"}
+            },
+        )
+        self._assert_detections(samples, expected, "detections", 0.1)
+        self._assert_images(samples, expected)
+        for stem, sample in samples.items():
+            np.testing.assert_allclose(
+                sorted(sample.polylines.polylines[0].points[0]),
+                sorted(expected[stem].polys.polylines[0].points[0]),
+                atol=0.1 / 500,
+            )
+
+    @drop_datasets
+    def test_classification_formats(self):
+        tiles, expected = self._tiles()
+        for dataset_type in (
+            fo.types.FiftyOneImageClassificationDataset,
+            fo.types.ImageClassificationDirectoryTree,
+        ):
+            samples = self._round_trip(
+                tiles,
+                expected,
+                dataset_type,
+                export_kwargs={"label_field": "weather"},
+            )
+            self._assert_images(samples, expected)
+            self.assertEqual(
+                [s.ground_truth.label for s in samples.values()],
+                ["sunny", "sunny"],
+            )
+
+    @drop_datasets
+    def test_media_formats(self):
+        tiles, expected = self._tiles()
+        for dataset_type in (fo.types.ImageDirectory, fo.types.MediaDirectory):
+            samples = self._round_trip(tiles, expected, dataset_type)
+            self._assert_images(samples, expected)
+
+    @drop_datasets
+    def test_csv_and_geojson(self):
+        tiles, expected = self._tiles()
+
+        samples = self._round_trip(
+            tiles,
+            expected,
+            fo.types.CSVDataset,
+            export_kwargs={"fields": ["filepath", "score"]},
+        )
+        self._assert_images(samples, expected)
+        self.assertEqual([s.score for s in samples.values()], ["0.5", "0.5"])
+
+        samples = self._round_trip(tiles, expected, fo.types.GeoJSONDataset)
+        self._assert_images(samples, expected)
+        for sample in samples.values():
+            self.assertEqual(sample.location.point, [-73.9855, 40.758])
+
+    @drop_datasets
+    def test_fiftyone_formats(self):
+        tiles, expected = self._tiles()
+        for dataset_type in (
+            fo.types.FiftyOneDataset,
+            fo.types.LegacyFiftyOneDataset,
+        ):
+            samples = self._round_trip(tiles, expected, dataset_type)
+            self._assert_images(samples, expected)
+            for stem, sample in samples.items():
+                wanted = expected[stem]
+                self.assertEqual(sample.tile.to_dict(), wanted.tile.to_dict())
+
+                # each export materializes the tiles again, with new IDs
+                for field in ("gt", "polys", "kps"):
+                    self.assertEqual(
+                        _without_ids(sample[field].to_dict()),
+                        _without_ids(wanted[field].to_dict()),
+                    )
+
+                np.testing.assert_array_equal(
+                    sample.instances.detections[0].mask,
+                    wanted.instances.detections[0].mask,
+                )
+                np.testing.assert_array_equal(
+                    sample.seg.get_mask(), wanted.seg.get_mask()
+                )
+
+    @drop_datasets
+    def test_tf_formats(self):
+        try:
+            import tensorflow  # pylint: disable=unused-import
+        except ImportError:
+            self.skipTest("TensorFlow is not installed")
+
+        tiles, expected = self._tiles()
+        expected = [expected[stem] for stem in sorted(expected)]
+
+        def round_trip(dataset_type, label_field):
+            export_dir = os.path.join(self.tmp, dataset_type.__name__)
+            tiles.export(
+                export_dir,
+                dataset_type=dataset_type,
+                label_field=label_field,
+                image_format=".png",
+            )
+
+            # TFRecords do not keep the image filenames, but their order
+            imported = fo.Dataset.from_dir(
+                dataset_dir=export_dir,
+                dataset_type=dataset_type,
+                images_dir=os.path.join(export_dir, "images"),
+                image_format=".png",
+            )
+            samples = sorted(imported, key=lambda s: s.filepath)
+            self.assertEqual(len(samples), len(expected))
+            for sample, wanted in zip(samples, expected):
+                np.testing.assert_array_equal(
+                    _read(sample.filepath), _read(wanted.filepath)
+                )
+
+            return zip(samples, expected)
+
+        for sample, wanted in round_trip(
+            fo.types.TFObjectDetectionDataset, "gt"
+        ):
+            actual = sample.ground_truth.detections
+            self.assertEqual(
+                [d.label for d in actual],
+                [d.label for d in wanted.gt.detections],
+            )
+            for a, e in zip(actual, wanted.gt.detections):
+                np.testing.assert_allclose(
+                    a.bounding_box, e.bounding_box, atol=1e-6
+                )
+
+        for sample, _ in round_trip(
+            fo.types.TFImageClassificationDataset, "weather"
+        ):
+            self.assertEqual(sample.ground_truth.label, "sunny")
 
 
 if __name__ == "__main__":

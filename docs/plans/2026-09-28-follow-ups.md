@@ -149,13 +149,14 @@ tile (optional `min_label_coverage`), and keeps tags on the tiles only.
     re-zoom the image already open in the modal; it applies to the next sample.
     Re-run the zoom on change (`zoomPad` feeds
     `app/packages/looker/src/zoom.ts`).
-3.  **Export a tiled training set** (done for YOLOv5):
-    `TilesView.materialize()` writes the tile crops and builds a dataset with
-    labels clipped to the tiles, and `TilesView.export()` exports them in any
-    format; see `2026-10-02-tiles-export-design.md`. Still open: round-trip
-    tests for the formats other than YOLOv5 and COCO boxes, updating VOC/KITTI
-    `truncated` for clipped boxes, CVAT's crash on NaN keypoints, and an
-    "Export tiles" operator in the tiles plugin.
+3.  **Export a tiled training set** (done): `TilesView.materialize()` writes
+    the tile crops and builds a dataset with labels clipped to the tiles,
+    `TilesView.export()` exports them in any format, with a round-trip test per
+    format, and the tiles plugin's "Export tiles" action does it from the App;
+    see `2026-10-02-tiles-export-design.md`. Found along the way: instance
+    masks exported to FiftyOne image labels cannot be read back, an eta bug
+    (`DetectedObject` writes masks as lists but reads them as base64 strings),
+    still open.
 4.  **Hole direction in the eta fork's bridged polygons**: `_bridge_holes()` in
     `eta/core/image.py` runs each hole in the same direction as its outer
     boundary (a ring's signed area is the outer's plus the hole's). Filling

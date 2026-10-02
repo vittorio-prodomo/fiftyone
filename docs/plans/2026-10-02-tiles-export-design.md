@@ -103,8 +103,16 @@ visible after clipping.
 
 ## Exporters
 
-Tested round trips: YOLOv5 (boxes, polygons, `use_masks=True`, splits), COCO
-(boxes), ImageDirectory. Notes for the others:
+Every image format has a round-trip test (`ExportFormatsTests` in
+`tests/unittests/tiles_export_tests.py`): a tiles view is exported, read back
+with FiftyOne's importer, and compared with the materialized tiles, within each
+format's precision (exact for float formats, a pixel for formats that round).
+Covered: YOLOv4/v5 (boxes, polygons, `use_masks=True`, splits, empty tiles),
+COCO (boxes, masks, polygons, keypoints), VOC, KITTI, CVAT image, FiftyOne
+image detection and image labels, BDD, image segmentation directory, the
+classification formats, image and media directories, CSV, GeoJSON, FiftyOne
+dataset and legacy dataset, and the TFRecords formats (with TensorFlow
+installed). Notes:
 
 - **YOLOv4/v5**: pass `classes` when exporting splits; tiles may leave a split
   without some classes, which would otherwise change the class indices.
@@ -128,11 +136,37 @@ Tested round trips: YOLOv5 (boxes, polygons, `use_masks=True`, splits), COCO
     never samples backgrounds, with or without a label file
 
 - **COCO**: cropped instance masks become polygons through the eta fork's
-  hole-aware conversion; NaN keypoints are written as `(0, 0, 0)`
-- **VOC, KITTI**: their `truncated` attributes are written as stored, not
-  updated for clipped boxes
-- **CVAT image**: crashes on NaN keypoints (upstream, also for hidden
-  keypoints); instance masks are dropped
+  hole-aware conversion; NaN keypoints are written as `(0, 0, 0)`, and read
+  back as NaN. Importing polygon segmentations with `use_polylines=True`
+  crashed on any COCO dataset, because a fork change to
+  `_get_polygons_for_segmentation()` expected point pairs where COCO JSON has
+  flat lists; fixed
+- **VOC, KITTI**: detections that a tile cuts get `truncated`: VOC's flag
+  becomes 1, KITTI's fraction accounts for the part outside the tile
+  (`1 - (1 - t) * visible`). Existing values of other types are updated the
+  same way by `clip_label()`; missing ones are only added for these formats
+- **CVAT image**: crashed on NaN keypoints (also for hidden keypoints, without
+  tiles); hidden points are now omitted, since CVAT points cannot be hidden,
+  and keypoints without visible points are skipped. Instance masks are dropped
+- **FiftyOne image labels**: instance masks cannot be read back (an eta bug,
+  also without tiles: masks are written as lists but read as base64 strings),
+  so the test exports boxes, polylines, and keypoints
 - **ImageSegmentationDirectory**: needs the cropped segmentation masks, which
   materialization provides
+- **TFRecords**: image filenames are not kept, so the test matches tiles by
+  order
 - **FiftyOneDataset**: keeps the `tile` provenance field
+
+## Export tiles operator
+
+The tiles plugin's "Export tiles" grid action (on tiles views) exports the
+current tiles view from the App: a format (YOLOv5, YOLOv4, COCO, VOC, KITTI,
+CVAT image, FiftyOne image detection, image segmentation directory, image
+classification directory tree, FiftyOne dataset, or images only), a label field
+of a type that the format exports, an export directory, the three `empty_tiles`
+choices, `join_polygon_parts` for polyline fields, the YOLOv5 split, and
+whether to delete the directory first. For YOLO and COCO, the classes come from
+the whole source dataset, so that class indices stay the same across the splits
+and tilings exported. A summary shows the number of tiles and images, the tiles
+without labels, and the classes. The export runs immediately or as a delegated
+operation, and reports its progress in two phases (cropping, then writing).
