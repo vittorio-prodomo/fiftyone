@@ -163,10 +163,19 @@ The tiles plugin's "Export tiles" grid action (on tiles views) exports the
 current tiles view from the App: a format (YOLOv5, YOLOv4, COCO, VOC, KITTI,
 CVAT image, FiftyOne image detection, image segmentation directory, image
 classification directory tree, FiftyOne dataset, or images only), a label field
-of a type that the format exports, an export directory, the three `empty_tiles`
-choices, `join_polygon_parts` for polyline fields, the YOLOv5 split, and
-whether to delete the directory first. For YOLO and COCO, the classes come from
-the whole source dataset, so that class indices stay the same across the splits
-and tilings exported. A summary shows the number of tiles and images, the tiles
-without labels, and the classes. The export runs immediately or as a delegated
-operation, and reports its progress in two phases (cropping, then writing).
+of a type that the format exports, an export directory, what to do with
+negative tiles (without labels), `join_polygon_parts` for polyline fields, the
+YOLOv5 split, and whether to delete the directory first.
+
+The choices for negative tiles depend on the format: YOLOv5 offers all three
+(exported with empty label files, exported without label files, not exported),
+while the other formats with labels only keep or skip them, since they have no
+per-image label files. Each set of choices has its own form parameter, so that
+a choice made for one format does not carry over to another; formats without
+labels have none.
+
+For YOLO and COCO, the classes come from the whole source dataset, so that
+class indices stay the same across the splits and tilings exported. A summary
+shows the number of tiles and images, the tiles without labels, and the
+classes. The export runs immediately or as a delegated operation, and reports
+its progress in two phases (cropping, then writing).

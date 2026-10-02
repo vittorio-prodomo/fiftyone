@@ -350,11 +350,17 @@ class ExportTilesTests(unittest.TestCase):
         props = inputs()
         self.assertEqual(props["format"].default, "yolov5")
         self.assertEqual(props["label_field"].type.values, ["gt", "polys"])
+        # YOLOv5 decides which label files exist for negative tiles
         self.assertEqual(
-            props["empty_tiles"].type.values,
+            props["yolo_empty_tiles"].type.values,
             ["keep", "keep_without_labels", "skip"],
         )
-        self.assertEqual(props["empty_tiles"].default, "keep")
+        self.assertEqual(props["yolo_empty_tiles"].default, "keep")
+        self.assertEqual(
+            props["yolo_empty_tiles"].view.label,
+            "Negative Tiles (i.e., without labels)",
+        )
+        self.assertNotIn("empty_tiles", props)
         self.assertEqual(props["split"].default, "train")
         self.assertNotIn("join_polygon_parts", props)
 
@@ -367,10 +373,21 @@ class ExportTilesTests(unittest.TestCase):
         # polylines can join their parts
         self.assertIn("join_polygon_parts", inputs(label_field="polys"))
 
-        # other formats offer other fields, and no split
+        # other formats offer other fields, no split, and only to keep or
+        # skip negative tiles
         props = inputs(format="classification")
         self.assertEqual(props["label_field"].type.values, ["weather"])
         self.assertNotIn("split", props)
+        self.assertEqual(props["empty_tiles"].type.values, ["keep", "skip"])
+
+        props = inputs(format="coco")
+        self.assertEqual(props["label_field"].type.values, ["gt", "polys"])
+        self.assertEqual(props["empty_tiles"].type.values, ["keep", "skip"])
+        self.assertEqual(
+            props["empty_tiles"].view.label,
+            "Negative Tiles (i.e., without labels)",
+        )
+        self.assertNotIn("yolo_empty_tiles", props)
 
         props = inputs(format="images")
         self.assertNotIn("label_field", props)
@@ -397,7 +414,7 @@ class ExportTilesTests(unittest.TestCase):
             format="yolov5",
             label_field="gt",
             export_dir={"absolute_path": export_dir},
-            empty_tiles="skip",
+            yolo_empty_tiles="skip",
             split="val",
         )
         result = ExportTiles().execute(ctx)
@@ -426,6 +443,24 @@ class ExportTilesTests(unittest.TestCase):
         )
         self.assertEqual(ExportTiles().execute(ctx)["num_tiles"], 4)
         self.assertEqual(len(os.listdir(export_dir)), 4)
+
+        # other formats keep or skip negative tiles, and a choice made for
+        # YOLOv5 does not carry over to them
+        for params, num_tiles in (
+            ({"empty_tiles": "skip"}, 2),
+            ({"yolo_empty_tiles": "skip"}, 4),
+        ):
+            export_dir = os.path.join(self.tmp, "detection%d" % num_tiles)
+            ctx = self._ctx(
+                dataset,
+                tiles,
+                format="fiftyone_detection",
+                label_field="gt",
+                export_dir={"absolute_path": export_dir},
+                **params,
+            )
+            result = ExportTiles().execute(ctx)
+            self.assertEqual(result["num_tiles"], num_tiles, msg=params)
 
         # an export directory is required
         ctx = self._ctx(dataset, tiles, format="images")

@@ -88,24 +88,28 @@ _EXPORT_FORMATS = {
 
 _DEFAULT_FORMAT = "yolov5"
 
-_EMPTY_TILES_CHOICES = (
+# The choices for negative tiles (without labels): in YOLOv5, they also
+# decide which label files exist. Each set has its own form parameter, so
+# that a choice made for one format does not carry over to another
+_YOLO_EMPTY_TILES = (
+    "yolo_empty_tiles",
     (
-        "keep",
-        "Keep, with empty labels",
-        "Exported with empty labels, such as empty label files in YOLO, "
-        "which trainers use as background images",
+        (
+            "keep",
+            "Keep, with empty labels",
+            "Exported, with empty label files",
+        ),
+        (
+            "keep_without_labels",
+            "Keep, without labels",
+            "Exported, without label files",
+        ),
+        ("skip", "Skip", "Not exported"),
     ),
-    (
-        "keep_without_labels",
-        "Keep, without labels",
-        "Exported without labels, such as no label files in YOLO. "
-        "Ultralytics and Darknet still train on them as background images",
-    ),
-    (
-        "skip",
-        "Skip",
-        "Not exported, which is the way to leave them out of training",
-    ),
+)
+_EMPTY_TILES = (
+    "empty_tiles",
+    (("keep", "Keep", "Exported"), ("skip", "Skip", "Not exported")),
 )
 
 _YOLO_SPLITS = ("train", "val", "test")
@@ -598,17 +602,18 @@ class ExportTiles(foo.Operator):
         )
 
         if label_field is not None:
+            param, choices = _get_empty_tiles_choices(fmt)
             empty_choices = types.RadioGroup()
-            for value, label, description in _EMPTY_TILES_CHOICES:
+            for value, label, description in choices:
                 empty_choices.add_choice(
                     value, label=label, description=description
                 )
 
             inputs.enum(
-                "empty_tiles",
+                param,
                 empty_choices.values(),
                 default="keep",
-                label="Tiles without labels",
+                label="Negative Tiles (i.e., without labels)",
                 description=(
                     "Tiles without labels in %s, because none of their "
                     "image's labels touch them or clipping removed them all"
@@ -617,17 +622,17 @@ class ExportTiles(foo.Operator):
                 view=empty_choices,
             )
 
-            if _is_polylines_field(ctx, label_field):
-                inputs.bool(
-                    "join_polygon_parts",
-                    default=False,
-                    label="Join polygon parts",
-                    description=(
-                        "Keep a polygon that a tile cuts into several parts "
-                        "as one polygon, its parts joined along the tile's "
-                        "border, rather than one polygon per part"
-                    ),
-                )
+        if label_field is not None and _is_polylines_field(ctx, label_field):
+            inputs.bool(
+                "join_polygon_parts",
+                default=False,
+                label="Join polygon parts",
+                description=(
+                    "Keep a polygon that a tile cuts into several parts as "
+                    "one polygon, its parts joined along the tile's border, "
+                    "rather than one polygon per part"
+                ),
+            )
 
         if fmt.dataset_type is fo.types.YOLOv5Dataset:
             split_choices = types.Dropdown()
@@ -680,7 +685,12 @@ class ExportTiles(foo.Operator):
                 raise ValueError("Choose a label field to export")
 
             kwargs["label_field"] = label_field
-            kwargs["empty_tiles"] = ctx.params.get("empty_tiles") or "keep"
+            param, choices = _get_empty_tiles_choices(fmt)
+            empty_tiles = ctx.params.get(param) or "keep"
+            if empty_tiles not in [c[0] for c in choices]:
+                raise ValueError("Invalid choice %r" % empty_tiles)
+
+            kwargs["empty_tiles"] = empty_tiles
             kwargs["join_polygon_parts"] = bool(
                 ctx.params.get("join_polygon_parts", False)
             )
@@ -722,6 +732,14 @@ class _ExportProgress(object):
         phase = min(len(self._bars), len(self._PHASES)) - 1
         progress = (phase + (pb.progress or 0)) / len(self._PHASES)
         self._ctx.set_progress(progress=progress, label=self._PHASES[phase])
+
+
+def _get_empty_tiles_choices(fmt):
+    """The form parameter and choices for negative tiles in the format."""
+    if fmt.dataset_type is fo.types.YOLOv5Dataset:
+        return _YOLO_EMPTY_TILES
+
+    return _EMPTY_TILES
 
 
 def _is_tiles_view(ctx):
