@@ -2175,9 +2175,10 @@ def _get_attributes(label, extra_attrs):
 def _get_polygons_for_segmentation(segmentation, frame_size, tolerance):
     width, height = frame_size
 
-    # Convert to [[x1, y1, x2, y2, ...]] polygons
+    # Convert to [[(x1, y1), (x2, y2), ...]] polygons
     if isinstance(segmentation, list):
-        abs_points = segmentation
+        # COCO polygons are flat [x1, y1, x2, y2, ...] lists
+        abs_points = [list(_pairwise(p)) for p in segmentation]
     else:
         if isinstance(segmentation["counts"], list):
             # Uncompressed RLE

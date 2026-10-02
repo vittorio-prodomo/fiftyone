@@ -1632,6 +1632,79 @@ class ImageDetectionDatasetTests(ImageDatasetTests):
         )
 
     @drop_datasets
+    def test_coco_segmentations_as_polylines(self):
+        square = [(0.3, 0.6), (0.5, 0.6), (0.5, 0.8), (0.3, 0.8)]
+        mask = np.zeros((10, 10), dtype=bool)
+        mask[2:8, 2:8] = True
+
+        dataset = fo.Dataset()
+        dataset.add_sample(
+            fo.Sample(
+                filepath=self._new_image(),
+                polylines=fo.Polylines(
+                    polylines=[
+                        fo.Polyline(
+                            label="lot",
+                            points=[square],
+                            closed=True,
+                            filled=True,
+                        )
+                    ]
+                ),
+                instances=fo.Detections(
+                    detections=[
+                        fo.Detection(
+                            label="car",
+                            bounding_box=[0.1, 0.1, 0.2, 0.2],
+                            mask=mask,
+                            iscrowd=1,
+                        )
+                    ]
+                ),
+            )
+        )
+
+        # polygons, stored as flat [x1, y1, x2, y2, ...] lists
+        export_dir = self._new_dir()
+        dataset.export(
+            export_dir=export_dir,
+            dataset_type=fo.types.COCODetectionDataset,
+            label_field="polylines",
+        )
+        dataset2 = fo.Dataset.from_dir(
+            dataset_dir=export_dir,
+            dataset_type=fo.types.COCODetectionDataset,
+            label_types="segmentations",
+            label_field="segmentations",
+            use_polylines=True,
+        )
+        (polyline,) = dataset2.first().segmentations.polylines
+        (points,) = polyline.points
+        self.assertEqual(polyline.label, "lot")
+        self.assertEqual(len(points), 4)
+        np.testing.assert_allclose(
+            sorted(points), sorted(square), atol=1 / 480
+        )
+
+        # RLE masks (iscrowd)
+        export_dir = self._new_dir()
+        dataset.export(
+            export_dir=export_dir,
+            dataset_type=fo.types.COCODetectionDataset,
+            label_field="instances",
+        )
+        dataset2 = fo.Dataset.from_dir(
+            dataset_dir=export_dir,
+            dataset_type=fo.types.COCODetectionDataset,
+            label_types="segmentations",
+            label_field="segmentations",
+            use_polylines=True,
+        )
+        (polyline,) = dataset2.first().segmentations.polylines
+        self.assertEqual(polyline.label, "car")
+        self.assertEqual(len(polyline.points), 1)
+
+    @drop_datasets
     def test_voc_detection_dataset(self):
         dataset = self._make_dataset()
 
@@ -3317,6 +3390,43 @@ class MultitaskImageDatasetTests(ImageDatasetTests):
         self.assertEqual(len(relpath.split(os.path.sep)), 3)
 
     @skipwindows
+    @drop_datasets
+    def test_cvat_image_dataset_hidden_keypoints(self):
+        nan = float("nan")
+        dataset = fo.Dataset()
+        dataset.add_sample(
+            fo.Sample(
+                filepath=self._new_image(),
+                keypoints=fo.Keypoints(
+                    keypoints=[
+                        fo.Keypoint(
+                            label="person",
+                            points=[(0.1, 0.2), (nan, nan), (0.3, 0.4)],
+                        ),
+                        fo.Keypoint(label="hidden", points=[(nan, nan)]),
+                    ]
+                ),
+            )
+        )
+
+        export_dir = self._new_dir()
+        dataset.export(
+            export_dir=export_dir,
+            dataset_type=fo.types.CVATImageDataset,
+            label_field="keypoints",
+        )
+
+        dataset2 = fo.Dataset.from_dir(
+            dataset_dir=export_dir,
+            dataset_type=fo.types.CVATImageDataset,
+        )
+
+        # CVAT points cannot be hidden, so hidden points are omitted, and
+        # keypoints whose points are all hidden too
+        keypoints = dataset2.first().keypoints.keypoints
+        self.assertEqual([k.label for k in keypoints], ["person"])
+        self.assertEqual(len(keypoints[0].points), 2)
+
     @drop_datasets
     def test_fiftyone_dataset(self):
         dataset = self._make_dataset()

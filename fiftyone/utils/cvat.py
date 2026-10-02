@@ -1875,6 +1875,7 @@ class CVATImage(object):
         points = [
             CVATImagePoints.from_keypoint(k, metadata) for k in _keypoints
         ]
+        points = [p for p in points if p.points]
 
         return cls(
             None,
@@ -1986,8 +1987,14 @@ class HasCVATPoints(object):
 
     @staticmethod
     def _to_abs_points(points, frame_size):
+        # Hidden points, such as those of keypoints, are NaN; CVAT points
+        # cannot represent them, so they are omitted
         w, h = frame_size
-        return [(int(round(x * w)), int(round(y * h))) for x, y in points]
+        return [
+            (int(round(x * w)), int(round(y * h)))
+            for x, y in points
+            if _is_finite(x) and _is_finite(y)
+        ]
 
     @staticmethod
     def _to_cvat_points_str(points):
@@ -2619,9 +2626,9 @@ class CVATTrack(object):
                         fn, _label, frame_size
                     )
             elif isinstance(_label, fol.Keypoint):
-                points[fn - 1] = CVATVideoPoints.from_keypoint(
-                    fn, _label, frame_size
-                )
+                _points = CVATVideoPoints.from_keypoint(fn, _label, frame_size)
+                if _points.points:
+                    points[fn - 1] = _points
             elif _label is not None:
                 msg = "Ignoring unsupported label type '%s'" % _label.__class__
                 warnings.warn(msg)
@@ -8797,3 +8804,7 @@ def _get_next_frame(next_frame_idx, frame_step):
         frame_step = 1
 
     return next_frame_idx + frame_step
+
+
+def _is_finite(value):
+    return value is not None and math.isfinite(value)
