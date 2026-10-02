@@ -50,6 +50,8 @@ _TILE_LABEL_PATTERN = re.compile(r"^tile_(\d+)_(\d+)$")
 _IMAGE_CACHE_SIZE = 2
 
 _JPEG_EXTS = (".jpg", ".jpeg")
+
+_EMPTY_TILES = ("keep", "keep_without_labels", "skip")
 _JPEG_QUALITY = 95
 
 
@@ -182,12 +184,12 @@ def export_tiles(
 
     Tiles may have no labels in ``label_field``, either because none of
     their image's labels touch them or because clipping removed them all.
-    ``empty_tiles`` decides whether such tiles are exported: in YOLO and
-    similar formats, they become images with an empty label file, which
-    trainers such as Ultralytics' use as background images (negatives).
-    Note that those trainers also use images without a label file as
-    background images, so skipping empty tiles is the way to leave them out
-    of training.
+    ``empty_tiles`` decides how such tiles are exported. In YOLO and similar
+    formats, ``"keep"`` exports their images with empty label files, and
+    ``"keep_without_labels"`` exports their images without label files.
+    Note that trainers such as Ultralytics' (YOLOv3 since 2018, YOLOv5, and
+    YOLOv8 and later) and Darknet use both as background images (negatives),
+    so ``"skip"`` is the way to leave them out of training.
 
     Args:
         tiles_view: a :class:`fiftyone.core.tiles.TilesView`
@@ -213,8 +215,15 @@ def export_tiles(
             the default value ``fiftyone.config.show_progress_bars`` (None),
             or a progress callback function to invoke instead
         empty_tiles ("keep"): what to do with the tiles that have no labels
-            in ``label_field``: ``"keep"`` exports them, as background images,
-            and ``"skip"`` leaves them out. Skipping requires ``label_field``
+            in ``label_field``:
+
+            -   ``"keep"``: export them with empty labels. Tiles whose source
+                had no labels at all get empty labels too, for lists of
+                labels such as :class:`fiftyone.core.labels.Detections`
+            -   ``"keep_without_labels"``: export them without labels
+            -   ``"skip"``: do not export them
+
+            Values other than ``"keep"`` require ``label_field``
         join_polygon_parts (False): whether to keep a filled polyline shape
             that a tile cuts into several parts as one shape, whose parts are
             joined by zero-area edges along the tile's border, rather than
@@ -222,20 +231,21 @@ def export_tiles(
         **kwargs: optional keyword arguments to pass to the dataset
             exporter's constructor
     """
-    if empty_tiles not in ("keep", "skip"):
+    if empty_tiles not in _EMPTY_TILES:
         raise ValueError(
-            "`empty_tiles` must be 'keep' or 'skip', but found %r"
-            % (empty_tiles,)
+            "`empty_tiles` must be one of %s, but found %r"
+            % (_EMPTY_TILES, empty_tiles)
         )
 
     label_fields = _parse_label_fields(tiles_view, label_field)
-    if empty_tiles == "skip":
-        if not label_fields:
-            raise ValueError(
-                "Skipping empty tiles requires `label_field`, whose labels "
-                "decide which tiles are empty"
-            )
+    if empty_tiles != "keep" and not label_fields:
+        raise ValueError(
+            "`empty_tiles=%r` requires `label_field`, whose labels decide "
+            "which tiles are empty" % empty_tiles
+        )
 
+    num_tiles = len(tiles_view)
+    if empty_tiles == "skip":
         # Tiles without labels in the view have none once clipped either
         tiles_view = tiles_view.match(
             _has_labels_expr(tiles_view, label_fields)
@@ -279,25 +289,9 @@ def export_tiles(
 
         export_view = dataset
         if label_fields:
-            has_labels = _has_labels_expr(dataset, label_fields)
-            num_empty = len(dataset) - dataset.match(has_labels).count()
-            if empty_tiles == "skip":
-                export_view = dataset.match(has_labels)
-                if num_empty:
-                    logger.info(
-                        "Skipping %d tile(s) whose labels were all clipped "
-                        "away",
-                        num_empty,
-                    )
-            elif num_empty:
-                logger.info(
-                    "Exporting %d of %d tile(s) without labels in %s, as "
-                    "background images. Pass `empty_tiles='skip'` to leave "
-                    "them out",
-                    num_empty,
-                    len(dataset),
-                    label_fields,
-                )
+            export_view = _handle_empty_tiles(
+                dataset, label_fields, empty_tiles, num_tiles
+            )
 
         # The tile images are temporary, so the exporter moves them rather
         # than copying them
@@ -401,6 +395,65 @@ def clip_label(
         return _crop_dense_label(label, "map", tile, frame_size, mask_dir)
 
     return label.copy()
+
+
+def _handle_empty_tiles(dataset, label_fields, empty_tiles, num_tiles):
+    """Applies ``empty_tiles`` to the tiles without labels in
+    ``label_fields`` of a materialized tiles dataset, and returns the view to
+    export.
+    """
+    has_labels = _has_labels_expr(dataset, label_fields)
+    empty = dataset.match(~has_labels)
+    num_empty = len(empty)
+
+    if empty_tiles == "skip":
+        num_skipped = num_tiles - len(dataset) + num_empty
+        if num_skipped:
+            logger.info(
+                "Skipping %d of %d tile(s) without labels in %s",
+                num_skipped,
+                num_tiles,
+                label_fields,
+            )
+
+        return dataset.match(has_labels)
+
+    if not num_empty:
+        return dataset
+
+    if empty_tiles == "keep_without_labels":
+        for field in label_fields:
+            empty.set_values(field, [None] * num_empty)
+
+        logger.info(
+            "Exporting %d of %d tile(s) without labels in %s, as background "
+            "images without labels (no label files, in YOLO and similar "
+            "formats)",
+            num_empty,
+            num_tiles,
+            label_fields,
+        )
+        return dataset
+
+    # Tiles whose source had no labels at all also get empty labels, where
+    # the label type has an empty value (lists of labels)
+    for field in label_fields:
+        doc_type = getattr(dataset.get_field(field), "document_type", None)
+        if getattr(doc_type, "_LABEL_LIST_FIELD", None) is None:
+            continue
+
+        missing = empty.match(F(field) == None)
+        missing.set_values(field, [doc_type() for _ in range(len(missing))])
+
+    logger.info(
+        "Exporting %d of %d tile(s) without labels in %s, as background "
+        "images with empty labels (empty label files, in YOLO and similar "
+        "formats). Pass `empty_tiles='skip'` to leave them out",
+        num_empty,
+        num_tiles,
+        label_fields,
+    )
+    return dataset
 
 
 def _parse_label_fields(collection, label_field):

@@ -944,7 +944,7 @@ class ExportTilesTests(_TilesDatasetTests):
     def _u_dataset(self):
         """A 1500x1000 image cut into 3x2 tiles of 500px, with a U-shaped
         polygon whose bounding box covers the top middle tile, which the
-        polygon does not enter, and an image without labels.
+        polygon does not enter, and an image with no labels at all.
         """
         u_shape = [
             (100, 100),
@@ -967,7 +967,7 @@ class ExportTilesTests(_TilesDatasetTests):
                 "a.png": _coords_image(1500, 1000),
                 "b.png": _coords_image(1500, 1000),
             },
-            polys=[fo.Polylines(polylines=[poly]), fo.Polylines()],
+            polys=[fo.Polylines(polylines=[poly]), None],
         )
 
     def _yolo_label_files(self, export_dir):
@@ -990,55 +990,65 @@ class ExportTilesTests(_TilesDatasetTests):
         self.assertEqual(
             tiles.match(F("polys.polylines").length() > 0).count(), 6
         )
+        labeled = [
+            "a_tile_0_0",
+            "a_tile_0_2",
+            "a_tile_1_0",
+            "a_tile_1_1",
+            "a_tile_1_2",
+        ]
 
-        # kept by default, as images with an empty label file
-        export_dir = os.path.join(self.tmp, "keep")
-        with self.assertLogs("fiftyone.utils.tiles", level="INFO") as logs:
-            tiles.export(
-                export_dir,
-                dataset_type=fo.types.YOLOv5Dataset,
-                label_field="polys",
-            )
+        def export(empty_tiles):
+            export_dir = os.path.join(self.tmp, empty_tiles)
+            with self.assertLogs("fiftyone.utils.tiles", "INFO") as logs:
+                tiles.export(
+                    export_dir,
+                    dataset_type=fo.types.YOLOv5Dataset,
+                    label_field="polys",
+                    empty_tiles=empty_tiles,
+                )
 
-        self.assertIn(
-            "Exporting 7 of 12 tile(s) without labels", logs.output[0]
-        )
-        rows = self._yolo_label_files(export_dir)
+            images = os.listdir(os.path.join(export_dir, "images", "val"))
+            rows = self._yolo_label_files(export_dir)
+            return logs.output[0], len(images), rows
+
+        # with empty label files, including for b.png, which has no labels
+        message, num_images, rows = export("keep")
+        self.assertIn("Exporting 7 of 12 tile(s) without labels", message)
+        self.assertEqual(num_images, 12)
         self.assertEqual(len(rows), 12)
-        self.assertEqual(sum(not r for r in rows.values()), 7)
+        self.assertEqual(sorted(k for k, v in rows.items() if v), labeled)
         self.assertEqual(rows["a_tile_0_1"], [])
-        self.assertEqual(
-            len(os.listdir(os.path.join(export_dir, "images", "val"))), 12
-        )
+        self.assertEqual(rows["b_tile_0_0"], [])
 
-        # or skipped, images and label files alike
-        export_dir = os.path.join(self.tmp, "skip")
-        with self.assertLogs("fiftyone.utils.tiles", level="INFO") as logs:
-            tiles.export(
-                export_dir,
-                dataset_type=fo.types.YOLOv5Dataset,
-                label_field="polys",
-                empty_tiles="skip",
-            )
+        # without label files
+        message, num_images, rows = export("keep_without_labels")
+        self.assertIn("Exporting 7 of 12 tile(s) without labels", message)
+        self.assertIn("no label files", message)
+        self.assertEqual(num_images, 12)
+        self.assertEqual(sorted(rows), labeled)
 
-        self.assertIn("Skipping 1 tile(s)", logs.output[0])
-        rows = self._yolo_label_files(export_dir)
-        self.assertEqual(
-            sorted(rows),
-            [
-                "a_tile_0_0",
-                "a_tile_0_2",
-                "a_tile_1_0",
-                "a_tile_1_1",
-                "a_tile_1_2",
-            ],
-        )
+        # not at all
+        message, num_images, rows = export("skip")
+        self.assertIn("Skipping 7 of 12 tile(s)", message)
+        self.assertEqual(num_images, 5)
+        self.assertEqual(sorted(rows), labeled)
         self.assertTrue(all(rows.values()))
-        self.assertEqual(
-            len(os.listdir(os.path.join(export_dir, "images", "val"))), 5
-        )
 
-        for kwargs in ({"empty_tiles": "drop"}, {"empty_tiles": "skip"}):
+        # keep is the default
+        export_dir = os.path.join(self.tmp, "default")
+        tiles.export(
+            export_dir,
+            dataset_type=fo.types.YOLOv5Dataset,
+            label_field="polys",
+        )
+        self.assertEqual(len(self._yolo_label_files(export_dir)), 12)
+
+        for kwargs in (
+            {"label_field": "polys", "empty_tiles": "drop"},
+            {"empty_tiles": "skip"},
+            {"empty_tiles": "keep_without_labels"},
+        ):
             with self.assertRaises(ValueError, msg=kwargs):
                 tiles.export(
                     os.path.join(self.tmp, "bad"),

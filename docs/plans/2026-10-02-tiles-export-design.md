@@ -110,11 +110,23 @@ Tested round trips: YOLOv5 (boxes, polygons, `use_masks=True`, splits), COCO
   without some classes, which would otherwise change the class indices.
   `export(empty_tiles=...)` decides what happens to tiles without labels in
   `label_field` (none of their image's labels touch them, or clipping removed
-  them all): `"keep"` (default) exports them as images with empty label files,
-  `"skip"` leaves them out. Ultralytics (YOLOv5 7.0 and 8.4) trains on images
-  with an empty label file and on images without one alike, as backgrounds, so
-  skipping is the only way to leave them out. The export logs how many empty
-  tiles it exported or skipped
+  them all): `"keep"` (default) exports them with empty label files (also when
+  their source had no labels at all), `"keep_without_labels"` exports their
+  images without label files, and `"skip"` leaves them out. The export logs how
+  many tiles each choice affected.
+
+    Only `"skip"` keeps them out of training: every trainer checked trains on
+    images without a label file as backgrounds, exactly like images with an
+    empty one. Checked in the code of Ultralytics' YOLOv3 (2018-2020), YOLOv5
+    (v1.0 of June 2020 through 7.0.14), `ultralytics` 8.0.0 through 8.4.171,
+    and AlexeyAB's Darknet (which also logs the missing file to `bad.list`).
+    Running `ultralytics` 8.4.171's training dataloader on 2 labeled images, 1
+    with an empty label file, and 2 without one fed all 5 images in every
+    epoch, and a batch of the 3 backgrounds alone has a classification loss
+    (0.23) and gradients, with no box loss. The one exception found is YOLOv5's
+    opt-in `--image-weights`, which samples images by their label counts and so
+    never samples backgrounds, with or without a label file
+
 - **COCO**: cropped instance masks become polygons through the eta fork's
   hole-aware conversion; NaN keypoints are written as `(0, 0, 0)`
 - **VOC, KITTI**: their `truncated` attributes are written as stored, not

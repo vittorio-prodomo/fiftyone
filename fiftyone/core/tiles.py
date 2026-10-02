@@ -99,7 +99,8 @@ class TilesView(fop.PatchesView):
         :meth:`fiftyone.core.collections.SampleCollection.export`, except
         that ``export_media`` can only be ``True`` or ``"move"``, plus
         ``empty_tiles``, which decides whether tiles without labels are
-        exported (``"keep"``) or left out (``"skip"``), and
+        exported with empty labels (``"keep"``), without labels
+        (``"keep_without_labels"``), or not at all (``"skip"``), and
         ``join_polygon_parts``. See
         :meth:`fiftyone.utils.tiles.export_tiles` for details.
 
