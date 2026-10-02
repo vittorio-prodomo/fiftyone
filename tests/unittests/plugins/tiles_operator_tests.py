@@ -352,12 +352,12 @@ class ExportTilesTests(unittest.TestCase):
         self.assertEqual(props["label_field"].type.values, ["gt", "polys"])
         # YOLOv5 decides which label files exist for negative tiles
         self.assertEqual(
-            props["yolo_empty_tiles"].type.values,
+            props["label_files_empty_tiles"].type.values,
             ["keep", "keep_without_labels", "skip"],
         )
-        self.assertEqual(props["yolo_empty_tiles"].default, "keep")
+        self.assertEqual(props["label_files_empty_tiles"].default, "keep")
         self.assertEqual(
-            props["yolo_empty_tiles"].view.label,
+            props["label_files_empty_tiles"].view.label,
             "Negative Tiles (i.e., without labels)",
         )
         self.assertNotIn("empty_tiles", props)
@@ -387,7 +387,19 @@ class ExportTilesTests(unittest.TestCase):
             props["empty_tiles"].view.label,
             "Negative Tiles (i.e., without labels)",
         )
-        self.assertNotIn("yolo_empty_tiles", props)
+        self.assertNotIn("label_files_empty_tiles", props)
+
+        # other formats with a label file per image also decide which ones
+        # exist
+        for fmt in ("yolov4", "kitti"):
+            props = inputs(format=fmt)
+            self.assertEqual(
+                props["label_files_empty_tiles"].type.values,
+                ["keep", "keep_without_labels", "skip"],
+                msg=fmt,
+            )
+            self.assertNotIn("empty_tiles", props)
+            self.assertNotIn("split", props)
 
         props = inputs(format="images")
         self.assertNotIn("label_field", props)
@@ -414,7 +426,7 @@ class ExportTilesTests(unittest.TestCase):
             format="yolov5",
             label_field="gt",
             export_dir={"absolute_path": export_dir},
-            yolo_empty_tiles="skip",
+            label_files_empty_tiles="skip",
             split="val",
         )
         result = ExportTiles().execute(ctx)
@@ -448,7 +460,7 @@ class ExportTilesTests(unittest.TestCase):
         # YOLOv5 does not carry over to them
         for params, num_tiles in (
             ({"empty_tiles": "skip"}, 2),
-            ({"yolo_empty_tiles": "skip"}, 4),
+            ({"label_files_empty_tiles": "skip"}, 4),
         ):
             export_dir = os.path.join(self.tmp, "detection%d" % num_tiles)
             ctx = self._ctx(
@@ -461,6 +473,43 @@ class ExportTilesTests(unittest.TestCase):
             )
             result = ExportTiles().execute(ctx)
             self.assertEqual(result["num_tiles"], num_tiles, msg=params)
+
+        # negative tiles without label files, in other formats with a label
+        # file per image
+        for empty_tiles, num_label_files in (
+            ("keep", 4),
+            ("keep_without_labels", 2),
+        ):
+            export_dir = os.path.join(self.tmp, "kitti_" + empty_tiles)
+            ctx = self._ctx(
+                dataset,
+                tiles,
+                format="kitti",
+                label_field="gt",
+                export_dir={"absolute_path": export_dir},
+                label_files_empty_tiles=empty_tiles,
+            )
+            self.assertEqual(ExportTiles().execute(ctx)["num_tiles"], 4)
+            data = os.listdir(os.path.join(export_dir, "data"))
+            labels = os.listdir(os.path.join(export_dir, "labels"))
+            self.assertEqual(len(data), 4)
+            self.assertEqual(len(labels), num_label_files, msg=empty_tiles)
+
+        export_dir = os.path.join(self.tmp, "yolov4")
+        ctx = self._ctx(
+            dataset,
+            tiles,
+            format="yolov4",
+            label_field="gt",
+            export_dir={"absolute_path": export_dir},
+            label_files_empty_tiles="keep_without_labels",
+        )
+        self.assertEqual(ExportTiles().execute(ctx)["num_tiles"], 4)
+        files = os.listdir(os.path.join(export_dir, "data"))
+        self.assertEqual(len([f for f in files if f.endswith(".png")]), 4)
+        self.assertEqual(len([f for f in files if f.endswith(".txt")]), 2)
+        with open(os.path.join(export_dir, "images.txt")) as f:
+            self.assertEqual(len(f.read().split()), 4)
 
         # an export directory is required
         ctx = self._ctx(dataset, tiles, format="images")

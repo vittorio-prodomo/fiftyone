@@ -167,12 +167,13 @@ of a type that the format exports, an export directory, what to do with
 negative tiles (without labels), `join_polygon_parts` for polyline fields, the
 YOLOv5 split, and whether to delete the directory first.
 
-The choices for negative tiles depend on the format: YOLOv5 offers all three
-(exported with empty label files, exported without label files, not exported),
-while the other formats with labels only keep or skip them, since they have no
-per-image label files. Each set of choices has its own form parameter, so that
-a choice made for one format does not carry over to another; formats without
-labels have none.
+The choices for negative tiles depend on the format: the formats with a label
+file per image (YOLOv5, YOLOv4, KITTI) offer all three (exported with empty
+label files, exported without label files, not exported), while the other
+formats with labels only keep or skip them, since they have no per-image label
+files. YOLOv4 lists the tiles kept without label files in `images.txt` too.
+Each set of choices has its own form parameter, so that a choice made for one
+format does not carry over to another; formats without labels have none.
 
 For YOLO and COCO, the classes come from the whole source dataset, so that
 class indices stay the same across the splits and tilings exported. A summary

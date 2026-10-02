@@ -199,9 +199,10 @@ def export_tiles(
 
     Tiles may have no labels in ``label_field``, either because none of
     their image's labels touch them or because clipping removed them all.
-    ``empty_tiles`` decides how such tiles are exported. In YOLO and similar
-    formats, ``"keep"`` exports their images with empty label files, and
-    ``"keep_without_labels"`` exports their images without label files.
+    ``empty_tiles`` decides how such tiles are exported. In formats with a
+    label file per image, such as YOLO and KITTI, ``"keep"`` exports their
+    images with empty label files, and ``"keep_without_labels"`` exports their
+    images without label files.
     Note that trainers such as Ultralytics' (YOLOv3 since 2018, YOLOv5, and
     YOLOv8 and later) and Darknet use both as background images (negatives),
     so ``"skip"`` is the way to leave them out of training.
@@ -497,8 +498,8 @@ def _handle_empty_tiles(dataset, label_fields, empty_tiles, num_tiles):
 
         logger.info(
             "Exporting %d of %d tile(s) without labels in %s, as background "
-            "images without labels (no label files, in YOLO and similar "
-            "formats)",
+            "images without labels (no label files, in YOLO, KITTI and "
+            "similar formats)",
             num_empty,
             num_tiles,
             label_fields,

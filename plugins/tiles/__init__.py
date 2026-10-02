@@ -88,11 +88,19 @@ _EXPORT_FORMATS = {
 
 _DEFAULT_FORMAT = "yolov5"
 
-# The choices for negative tiles (without labels): in YOLOv5, they also
-# decide which label files exist. Each set has its own form parameter, so
-# that a choice made for one format does not carry over to another
-_YOLO_EMPTY_TILES = (
-    "yolo_empty_tiles",
+# The formats that write a label file per image
+_LABEL_FILES_FORMATS = (
+    fo.types.YOLOv5Dataset,
+    fo.types.YOLOv4Dataset,
+    fo.types.KITTIDetectionDataset,
+)
+
+# The choices for negative tiles (without labels): in formats with a label
+# file per image, they also decide which label files exist. Each set has its
+# own form parameter, so that a choice made for one format does not carry
+# over to another
+_LABEL_FILES_EMPTY_TILES = (
+    "label_files_empty_tiles",
     (
         (
             "keep",
@@ -736,8 +744,8 @@ class _ExportProgress(object):
 
 def _get_empty_tiles_choices(fmt):
     """The form parameter and choices for negative tiles in the format."""
-    if fmt.dataset_type is fo.types.YOLOv5Dataset:
-        return _YOLO_EMPTY_TILES
+    if fmt.dataset_type in _LABEL_FILES_FORMATS:
+        return _LABEL_FILES_EMPTY_TILES
 
     return _EMPTY_TILES
 
