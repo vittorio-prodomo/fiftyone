@@ -11,6 +11,7 @@ clipped to the tile and re-normalized to it.
 """
 
 from collections import OrderedDict
+import fnmatch
 import logging
 import math
 import os
@@ -22,6 +23,7 @@ from PIL import Image, ImageOps
 import eta.core.utils as etau
 
 import fiftyone.core.dataset as fod
+import fiftyone.core.expressions as foe
 import fiftyone.core.fields as fof
 import fiftyone.core.labels as fol
 import fiftyone.core.metadata as fome
@@ -32,6 +34,8 @@ import fiftyone.core.utils as fou
 import fiftyone.utils.image as foui
 
 logger = logging.getLogger(__name__)
+
+F = foe.ViewField
 
 # Fields of tiles views that only describe the view itself
 _VIEW_FIELDS = {fot.TILE_FIELD, "sample_id"}
@@ -56,6 +60,7 @@ def materialize_tiles(
     rel_dir=None,
     image_format=None,
     tile_field="tile",
+    join_polygon_parts=False,
     name=None,
     persistent=False,
     progress=None,
@@ -94,6 +99,10 @@ def materialize_tiles(
             source image is used
         tile_field ("tile"): the name of the field in which to record the
             source of each tile
+        join_polygon_parts (False): whether to keep a filled polyline shape
+            that a tile cuts into several parts as one shape, whose parts are
+            joined by zero-area edges along the tile's border, rather than
+            one shape per part. See :meth:`clip_label`
         name (None): a name for the dataset
         persistent (False): whether the dataset should persist in the
             database after the session terminates
@@ -128,7 +137,13 @@ def materialize_tiles(
 
     view = tiles_view.select_fields(fields + [fot.TILE_FIELD, "sample_id"])
     samples = _iter_tile_samples(
-        view, output_dir, fields, rel_dir, image_format, tile_field
+        view,
+        output_dir,
+        fields,
+        rel_dir,
+        image_format,
+        tile_field,
+        join_polygon_parts,
     )
     dataset.add_samples(samples, num_samples=len(view), progress=progress)
 
@@ -148,6 +163,8 @@ def export_tiles(
     frame_labels_field=None,
     overwrite=False,
     progress=None,
+    empty_tiles="keep",
+    join_polygon_parts=False,
     **kwargs,
 ):
     """Exports the tiles of a tiles view as images with clipped labels.
@@ -162,6 +179,15 @@ def export_tiles(
     ``True`` or ``"move"``. To export tiles with other media options, such
     as symlinks, call :meth:`materialize_tiles` and export the resulting
     dataset.
+
+    Tiles may have no labels in ``label_field``, either because none of
+    their image's labels touch them or because clipping removed them all.
+    ``empty_tiles`` decides whether such tiles are exported: in YOLO and
+    similar formats, they become images with an empty label file, which
+    trainers such as Ultralytics' use as background images (negatives).
+    Note that those trainers also use images without a label file as
+    background images, so skipping empty tiles is the way to leave them out
+    of training.
 
     Args:
         tiles_view: a :class:`fiftyone.core.tiles.TilesView`
@@ -186,9 +212,35 @@ def export_tiles(
         progress (None): whether to render a progress bar (True/False), use
             the default value ``fiftyone.config.show_progress_bars`` (None),
             or a progress callback function to invoke instead
+        empty_tiles ("keep"): what to do with the tiles that have no labels
+            in ``label_field``: ``"keep"`` exports them, as background images,
+            and ``"skip"`` leaves them out. Skipping requires ``label_field``
+        join_polygon_parts (False): whether to keep a filled polyline shape
+            that a tile cuts into several parts as one shape, whose parts are
+            joined by zero-area edges along the tile's border, rather than
+            one shape per part. See :meth:`clip_label`
         **kwargs: optional keyword arguments to pass to the dataset
             exporter's constructor
     """
+    if empty_tiles not in ("keep", "skip"):
+        raise ValueError(
+            "`empty_tiles` must be 'keep' or 'skip', but found %r"
+            % (empty_tiles,)
+        )
+
+    label_fields = _parse_label_fields(tiles_view, label_field)
+    if empty_tiles == "skip":
+        if not label_fields:
+            raise ValueError(
+                "Skipping empty tiles requires `label_field`, whose labels "
+                "decide which tiles are empty"
+            )
+
+        # Tiles without labels in the view have none once clipped either
+        tiles_view = tiles_view.match(
+            _has_labels_expr(tiles_view, label_fields)
+        )
+
     if export_media not in (None, True, "move"):
         raise ValueError(
             "Tiles are exported as new images, so `export_media` must be "
@@ -218,15 +270,41 @@ def export_tiles(
     dataset = None
     try:
         dataset = materialize_tiles(
-            tiles_view, tmp_dir, rel_dir=rel_dir, progress=progress
+            tiles_view,
+            tmp_dir,
+            rel_dir=rel_dir,
+            join_polygon_parts=join_polygon_parts,
+            progress=progress,
         )
+
+        export_view = dataset
+        if label_fields:
+            has_labels = _has_labels_expr(dataset, label_fields)
+            num_empty = len(dataset) - dataset.match(has_labels).count()
+            if empty_tiles == "skip":
+                export_view = dataset.match(has_labels)
+                if num_empty:
+                    logger.info(
+                        "Skipping %d tile(s) whose labels were all clipped "
+                        "away",
+                        num_empty,
+                    )
+            elif num_empty:
+                logger.info(
+                    "Exporting %d of %d tile(s) without labels in %s, as "
+                    "background images. Pass `empty_tiles='skip'` to leave "
+                    "them out",
+                    num_empty,
+                    len(dataset),
+                    label_fields,
+                )
 
         # The tile images are temporary, so the exporter moves them rather
         # than copying them
         if dataset_exporter is None:
             kwargs["export_media"] = "move"
 
-        dataset.export(
+        export_view.export(
             export_dir=export_dir,
             dataset_type=dataset_type,
             data_path=data_path,
@@ -246,7 +324,9 @@ def export_tiles(
         etau.delete_dir(tmp_dir)
 
 
-def clip_label(label, tile, frame_size, mask_dir=None):
+def clip_label(
+    label, tile, frame_size, mask_dir=None, join_polygon_parts=False
+):
     """Clips a label to a tile of its image and re-normalizes it to the
     tile.
 
@@ -256,9 +336,11 @@ def clip_label(label, tile, frame_size, mask_dir=None):
         intersected with the tile, and the instance mask, if any, is cropped
         accordingly
     -   :class:`fiftyone.core.labels.Polyline`: filled shapes are clipped as
-        polygons, along the tile's borders where they leave it. Other shapes
-        are clipped as lines, which may split them into several shapes; a
-        closed shape that is split becomes open
+        polygons, along the tile's borders where they leave it. A shape that
+        the tile cuts into several parts becomes one shape per part, unless
+        ``join_polygon_parts`` is True. Other shapes are clipped as lines,
+        which may also split them into several shapes; a closed shape that
+        is split becomes open
     -   :class:`fiftyone.core.labels.Keypoint`: points outside the tile
         become ``NaN``, like hidden points, which keeps the order of the
         points
@@ -276,6 +358,10 @@ def clip_label(label, tile, frame_size, mask_dir=None):
         mask_dir (None): a directory in which to write the cropped masks and
             maps of labels that store them on disk. By default, cropped masks
             and maps are stored in memory
+        join_polygon_parts (False): whether to keep a filled shape that the
+            tile cuts into several parts as one shape, whose parts are joined
+            by zero-area edges along the tile's border (True), rather than
+            one shape per part (False)
 
     Returns:
         a new :class:`fiftyone.core.labels.Label`, or ``None`` if no part of
@@ -285,7 +371,13 @@ def clip_label(label, tile, frame_size, mask_dir=None):
         list_field = label._LABEL_LIST_FIELD
         clipped = []
         for _label in label[list_field]:
-            _label = clip_label(_label, tile, frame_size, mask_dir=mask_dir)
+            _label = clip_label(
+                _label,
+                tile,
+                frame_size,
+                mask_dir=mask_dir,
+                join_polygon_parts=join_polygon_parts,
+            )
             if _label is not None:
                 clipped.append(_label)
 
@@ -297,7 +389,7 @@ def clip_label(label, tile, frame_size, mask_dir=None):
         return _clip_detection(label, tile, frame_size, mask_dir)
 
     if isinstance(label, fol.Polyline):
-        return _clip_polyline(label, tile, frame_size)
+        return _clip_polyline(label, tile, frame_size, join_polygon_parts)
 
     if isinstance(label, fol.Keypoint):
         return _clip_keypoint(label, tile, frame_size)
@@ -309,6 +401,42 @@ def clip_label(label, tile, frame_size, mask_dir=None):
         return _crop_dense_label(label, "map", tile, frame_size, mask_dir)
 
     return label.copy()
+
+
+def _parse_label_fields(collection, label_field):
+    """The fields that ``label_field`` exports, as
+    :meth:`fiftyone.core.collections.SampleCollection.export` accepts it.
+    """
+    if label_field is None:
+        return []
+
+    if isinstance(label_field, dict):
+        return list(label_field.keys())
+
+    if etau.is_str(label_field):
+        if any(c in label_field for c in "*?["):
+            schema = collection.get_field_schema()
+            return [f for f in schema if fnmatch.fnmatch(f, label_field)]
+
+        return [label_field]
+
+    return list(label_field)
+
+
+def _has_labels_expr(collection, label_fields):
+    """An expression that matches the samples that have labels in any of the
+    given fields.
+    """
+    exprs = []
+    for field in label_fields:
+        doc_type = getattr(collection.get_field(field), "document_type", None)
+        list_field = getattr(doc_type, "_LABEL_LIST_FIELD", None)
+        if list_field is not None:
+            exprs.append(F(field + "." + list_field).length() > 0)
+        else:
+            exprs.append(F(field) != None)
+
+    return F.any(exprs)
 
 
 def _parse_fields(tiles_view, fields, tile_field):
@@ -364,7 +492,13 @@ def _copy_label_settings(src_collection, dataset, fields):
 
 
 def _iter_tile_samples(
-    view, output_dir, fields, rel_dir, image_format, tile_field
+    view,
+    output_dir,
+    fields,
+    rel_dir,
+    image_format,
+    tile_field,
+    join_polygon_parts,
 ):
     filename_maker = fou.UniqueFilenameMaker(
         output_dir=output_dir, rel_dir=rel_dir, ignore_existing=True
@@ -404,7 +538,13 @@ def _iter_tile_samples(
             value = tile_sample[field]
             if isinstance(value, fol.Label):
                 mask_dir = os.path.join(output_dir, "fields", field)
-                value = clip_label(value, tile, frame_size, mask_dir=mask_dir)
+                value = clip_label(
+                    value,
+                    tile,
+                    frame_size,
+                    mask_dir=mask_dir,
+                    join_polygon_parts=join_polygon_parts,
+                )
 
             sample[field] = value
 
@@ -628,13 +768,14 @@ def _crop_mask(label, cropped, attr, crop, mask_dir):
     cropped[path_attr] = outpath
 
 
-def _clip_polyline(polyline, tile, frame_size):
+def _clip_polyline(polyline, tile, frame_size, join_polygon_parts):
     img_w, img_h = frame_size
     tx, ty, tw, th = tile
     rect = (tx, ty, tx + tw, ty + th)
     eps = fot._EPS * max(img_w, img_h)
 
     shapes = []
+    closed_shapes = []
     was_split = False
     for shape in polyline.points or []:
         points = [
@@ -650,11 +791,30 @@ def _clip_polyline(polyline, tile, frame_size):
 
         if _is_inside(points, rect, eps):
             # Kept as-is, even if degenerate
+            if polyline.closed and not polyline.filled:
+                closed_shapes.append(len(shapes))
+
             shapes.append([_clamp_point(p, rect) for p in points])
         elif polyline.filled:
-            points = _clip_polygon(points, rect, eps)
-            if len(points) >= 3 and abs(_polygon_area(points)) > eps * eps:
-                shapes.append(points)
+            points = _orient_loops(points)
+            joined = _clip_polygon(points, rect, eps)
+            if join_polygon_parts:
+                parts = [joined]
+            else:
+                parts = _clip_polygon_parts(points, rect, eps)
+
+                # Splitting is only defined for (weakly) simple polygons;
+                # self-intersecting ones keep their joined clipping
+                area = sum(abs(_polygon_area(part)) for part in parts)
+                expected = abs(_polygon_area(joined)) if joined else 0.0
+                if abs(area - expected) > 1e-6 * max(expected, 1.0):
+                    parts = [joined]
+
+            shapes.extend(
+                part
+                for part in parts
+                if len(part) >= 3 and abs(_polygon_area(part)) > eps * eps
+            )
         else:
             pieces, split = _clip_line(points, rect, polyline.closed, eps)
             shapes.extend(pieces)
@@ -663,13 +823,18 @@ def _clip_polyline(polyline, tile, frame_size):
     if not shapes:
         return None
 
+    if was_split:
+        # The label becomes open, so its closed shapes that were not split
+        # explicitly repeat their first point
+        for i in closed_shapes:
+            shapes[i] = shapes[i] + shapes[i][:1]
+
     clipped = polyline.copy()
     clipped.points = [
         [((x - tx) / tw, (y - ty) / th) for x, y in shape] for shape in shapes
     ]
 
     if was_split:
-        # The shapes that were not split explicitly repeat their first point
         clipped.closed = False
 
     return clipped
@@ -709,6 +874,360 @@ def _clip_polygon(points, rect, eps):
         points = clipped
 
     return _dedupe_points(points, eps, closed=True)
+
+
+def _orient_loops(points):
+    """Orients the loops of a polygon that start and end at a repeated
+    vertex, such as holes bridged to their outer boundary by zero-width
+    seams, so that the polygon is weakly simple: loops inside their
+    enclosing loop (holes) run opposite to it, and other loops along it.
+
+    This keeps the polygon's edges, so it does not change the polygon under
+    the even-odd rule, but makes its interior lie on the same side of all
+    its edges, which splitting it requires. The eta fork's hole bridging,
+    for example, runs holes along their outer boundary.
+    """
+    # Decompose the polygon into properly nested loops
+    loops = []
+    path = []
+    on_path = {}
+    for i, point in enumerate(points):
+        key = tuple(point)
+        k = on_path.get(key)
+        if k is None:
+            on_path[key] = len(path)
+            path.append(i)
+            continue
+
+        loops.append((path[k], i))
+        for j in path[k + 1 :]:
+            del on_path[tuple(points[j])]
+
+        del path[k + 1 :]
+
+    if not loops:
+        return list(points)
+
+    root = _Loop(0, len(points))
+    stack = [root]
+    for start, end in sorted(loops, key=lambda l: (l[0], -l[1])):
+        while not stack[-1].contains(start, end):
+            stack.pop()
+
+        loop = _Loop(start, end)
+        stack[-1].children.append(loop)
+        stack.append(loop)
+
+    root.orient(points, None, None)
+    return root.expand(points)
+
+
+class _Loop(object):
+    """A loop of a polygon, from its vertex ``start`` to the repeated vertex
+    ``end``, or the whole polygon.
+    """
+
+    def __init__(self, start, end):
+        self.start = start
+        self.end = end
+        self.children = []
+        self.reverse = False
+
+    def contains(self, start, end):
+        return self.start <= start and end <= self.end
+
+    def own_indices(self):
+        """The loop's vertices, without those of the loops nested in it."""
+        indices = []
+        i = self.start
+        children = iter(sorted(self.children, key=lambda c: c.start))
+        child = next(children, None)
+        while i < self.end:
+            indices.append(i)
+            if child is not None and child.start == i:
+                i = child.end + 1
+                child = next(children, None)
+            else:
+                i += 1
+
+        return indices
+
+    def orient(self, points, outer, outer_positive):
+        """Decides the orientation of this loop and the loops in it, given
+        the nearest enclosing loop with an area and its orientation.
+        """
+        own = [points[i] for i in self.own_indices()]
+        area = _polygon_area(own) if len(own) >= 3 else 0.0
+
+        if area and outer is not None:
+            is_hole = _is_inside_polygon(_interior_points(own, area), outer)
+            positive = outer_positive != is_hole
+            self.reverse = (area > 0) != positive
+        elif area:
+            positive = area > 0
+        else:
+            # Degenerate, such as a seam: its loops relate to its outer loop
+            own, positive = outer, outer_positive
+
+        for child in self.children:
+            child.orient(points, own, positive)
+
+    def expand(self, points):
+        """The loop's vertices, from its start, with its nested loops."""
+        indices = self.own_indices()
+        if self.reverse:
+            indices = indices[:1] + indices[:0:-1]
+
+        children = {}
+        for child in self.children:
+            children.setdefault(child.start, []).append(child)
+
+        expanded = []
+        for i in indices:
+            expanded.append(points[i])
+            for child in children.get(i, []):
+                expanded.extend(child.expand(points)[1:])
+                expanded.append(points[i])
+
+        return expanded
+
+
+def _interior_points(polygon, area, num=3):
+    """Points just inside a polygon, next to the midpoints of its longest
+    edges, which avoids its vertices, which other polygons may share.
+    """
+    edges = sorted(
+        zip(polygon, polygon[1:] + polygon[:1]),
+        key=lambda e: (e[1][0] - e[0][0]) ** 2 + (e[1][1] - e[0][1]) ** 2,
+        reverse=True,
+    )
+
+    # The interior is on the left of the edges of positive area polygons
+    sign = 1.0 if area > 0 else -1.0
+    points = []
+    for (xa, ya), (xb, yb) in edges[:num]:
+        length = math.hypot(xb - xa, yb - ya)
+        if not length:
+            continue
+
+        offset = sign * 1e-6 * length
+        points.append(
+            (
+                (xa + xb) / 2 - offset * (yb - ya) / length,
+                (ya + yb) / 2 + offset * (xb - xa) / length,
+            )
+        )
+
+    return points
+
+
+def _is_inside_polygon(points, polygon):
+    """Whether most of the points are inside the polygon."""
+    num_inside = sum(_point_in_polygon(p, polygon) for p in points)
+    return 2 * num_inside > len(points)
+
+
+def _clip_polygon_parts(points, rect, eps):
+    """Clips a polygon to a rectangle, as one polygon per part of it inside
+    the rectangle.
+
+    This is the Weiler-Atherton algorithm for a rectangle: it collects the
+    chains of the polygon's boundary inside the rectangle, and links each
+    chain's exit to the next chain's entry along the rectangle's border, in
+    the polygon's orientation. Weakly simple polygons, such as those whose
+    holes are bridged to their outer boundary by zero-width seams, are
+    supported.
+    """
+    if len(points) < 3:
+        return []
+
+    if _polygon_area(points) < 0:
+        points = points[::-1]
+
+    # Start outside, so that no chain wraps around
+    start = next(
+        (i for i, p in enumerate(points) if not _is_inside([p], rect, eps)),
+        None,
+    )
+    if start is None:
+        return [points]
+
+    points = points[start:] + points[:start]
+
+    # Each chain is (points, entry crossing, exit crossing)
+    chains = []
+    chain = None
+    for p, q in zip(points, points[1:] + points[:1]):
+        direction = (q[0] - p[0], q[1] - p[1])
+        q_inside = _is_inside([q], rect, eps)
+        if chain is not None:
+            # Inside, as the rectangle is convex
+            if q_inside:
+                chain[0].append(_clamp_point(q, rect))
+                continue
+
+            segment = _clip_segment(p, q, rect, eps)
+            exit_ = segment[1] if segment else _clamp_point(p, rect)
+            chain[0].append(exit_)
+            chain.append(_crossing(exit_, direction, rect))
+            chains.append(chain)
+            chain = None
+            continue
+
+        segment = _clip_segment(p, q, rect, eps)
+        if segment is None:
+            continue
+
+        entry, end = segment
+        if q_inside:
+            chain = [[entry, end], _crossing(entry, direction, rect)]
+        elif not _same_point(entry, end, eps):
+            chains.append(
+                [
+                    [entry, end],
+                    _crossing(entry, direction, rect),
+                    _crossing(end, direction, rect),
+                ]
+            )
+
+    if not chains:
+        # The polygon either contains the rectangle or misses it
+        x0, y0, x1, y1 = rect
+        if _point_in_polygon(((x0 + x1) / 2, (y0 + y1) / 2), points):
+            return [[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
+
+        return []
+
+    perimeter = 2 * ((rect[2] - rect[0]) + (rect[3] - rect[1]))
+
+    def walk(exit_, entry):
+        """How far ``entry`` is after ``exit_`` along the border, in the
+        polygon's orientation, as a sortable ``(distance, order)``.
+        """
+        d = (entry[0] - exit_[0]) % perimeter
+        if eps < d < perimeter - eps:
+            return d, 0.0
+
+        # The same point, such as where the border cuts a zero-width seam:
+        # the crossings are ordered as in the polygon shrunk by an
+        # infinitesimal amount, which moves each of them to the inner side
+        # of its edge
+        order = entry[1] - exit_[1]
+        return (0.0 if order > 1e-12 else perimeter), order
+
+    parts = []
+    used = [False] * len(chains)
+    for first in range(len(chains)):
+        if used[first]:
+            continue
+
+        part = []
+        i = first
+        while True:
+            used[i] = True
+            part.extend(chains[i][0])
+
+            exit_ = chains[i][2]
+            i = min(
+                range(len(chains)),
+                key=lambda j: walk(exit_, chains[j][1]) + (used[j],),
+            )
+            distance = walk(exit_, chains[i][1])[0]
+            part.extend(_corners_between(exit_[0], distance, rect, eps))
+
+            if used[i]:
+                break
+
+        part = _remove_spikes(_dedupe_points(part, eps, closed=True), eps)
+        parts.append(part)
+
+    return parts
+
+
+def _crossing(point, direction, rect):
+    """Where the polygon's edge with ``direction`` crosses the rectangle's
+    border at ``point``: its border position, and how far an infinitesimal
+    shift of the edge to its inner (left) side moves it along the border.
+    """
+    position, side = _border_position(point, rect)
+    tangent = ((1, 0), (0, 1), (-1, 0), (0, -1))[side]
+    dx, dy = direction
+    norm = math.hypot(dx, dy) or 1.0
+    return position, (-dy * tangent[0] + dx * tangent[1]) / norm
+
+
+def _border_position(point, rect):
+    """The position of a point on the rectangle's border, measured along it
+    from ``(x0, y0)`` in the orientation of polygons with positive area, and
+    the index of its side.
+    """
+    x0, y0, x1, y1 = rect
+    x, y = point
+    w, h = x1 - x0, y1 - y0
+    dists = (abs(y - y0), abs(x - x1), abs(y - y1), abs(x - x0))
+    side = dists.index(min(dists))
+    if side == 0:
+        return x - x0, side
+
+    if side == 1:
+        return w + (y - y0), side
+
+    if side == 2:
+        return w + h + (x1 - x), side
+
+    return 2 * w + h + (y1 - y), side
+
+
+def _corners_between(s_from, distance, rect, eps):
+    """The corners of the rectangle that lie strictly within ``distance``
+    after border position ``s_from``, in order.
+    """
+    x0, y0, x1, y1 = rect
+    w, h = x1 - x0, y1 - y0
+    perimeter = 2 * (w + h)
+    corners = (
+        (0, (x0, y0)),
+        (w, (x1, y0)),
+        (w + h, (x1, y1)),
+        (2 * w + h, (x0, y1)),
+    )
+
+    found = []
+    for s, corner in corners:
+        d = (s - s_from) % perimeter
+        if eps < d < distance - eps:
+            found.append((d, corner))
+
+    return [corner for _, corner in sorted(found)]
+
+
+def _remove_spikes(points, eps):
+    """Removes the zero-width spikes ``a, b, a`` of a closed polygon."""
+    points = list(points)
+    i = 0
+    while len(points) >= 3 and i < len(points):
+        j = (i + 1) % len(points)
+        if _same_point(points[i - 1], points[j], eps):
+            for k in sorted((i, j), reverse=True):
+                points.pop(k)
+
+            i = max(i - 2, 0)
+        else:
+            i += 1
+
+    return points
+
+
+def _point_in_polygon(point, polygon):
+    # Even-odd rule
+    x, y = point
+    inside = False
+    for (xa, ya), (xb, yb) in zip(polygon, polygon[1:] + polygon[:1]):
+        if (ya > y) != (yb > y):
+            if x < xa + (y - ya) * (xb - xa) / (yb - ya):
+                inside = not inside
+
+    return inside
 
 
 def _at_x(p, q, x):

@@ -35,14 +35,41 @@ Labels are clipped in pixels of the full image, then re-normalized to the tile.
 Every clipped label gets a new ID, since one label can be in several
 overlapping tiles.
 
-| Label                 | Transform                                                                                                                                                                                                                   |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Detection             | Box intersected with the tile; dropped if no area is left. Instance masks are cropped to the visible part, at their own resolution                                                                                          |
-| Polyline, filled      | Sutherland-Hodgman polygon clipping. A concave polygon cut into several parts stays one polygon, joined along the tile border by zero-area edges (like the eta fork's hole bridging). Shapes inside the tile are kept as-is |
-| Polyline, not filled  | Liang-Barsky line clipping; a line can split into several shapes. A closed outline that is split becomes open                                                                                                               |
-| Keypoint              | Points outside the tile become NaN (like hidden points), keeping the order of the points for skeletons. Dropped if no point is visible                                                                                      |
-| Segmentation, Heatmap | Cropped to the tile at the array's own resolution                                                                                                                                                                           |
-| Other labels, fields  | Copied as-is (classifications, scalars, ...)                                                                                                                                                                                |
+| Label                 | Transform                                                                                                                                                                                                                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Detection             | Box intersected with the tile; dropped if no area is left. Instance masks are cropped to the visible part, at their own resolution                                                                                                                                                 |
+| Polyline, filled      | Clipped as polygons; a shape that the tile cuts into several parts becomes one shape per part (see below). With `join_polygon_parts=True`, Sutherland-Hodgman keeps it one shape, its parts joined along the tile border by zero-area edges. Shapes inside the tile are kept as-is |
+| Polyline, not filled  | Liang-Barsky line clipping; a line can split into several shapes. A closed outline that is split becomes open                                                                                                                                                                      |
+| Keypoint              | Points outside the tile become NaN (like hidden points), keeping the order of the points for skeletons. Dropped if no point is visible                                                                                                                                             |
+| Segmentation, Heatmap | Cropped to the tile at the array's own resolution                                                                                                                                                                                                                                  |
+| Other labels, fields  | Copied as-is (classifications, scalars, ...)                                                                                                                                                                                                                                       |
+
+## Polygon parts
+
+By default, a filled shape that a tile cuts into several parts becomes one
+shape per part, so YOLO writes one row (instance) per part, and COCO one
+annotation with several polygons. This uses the Weiler-Atherton algorithm for a
+rectangle (`_clip_polygon_parts()`): the chains of the polygon's boundary
+inside the tile are linked, from each exit to the next entry along the tile's
+border, into parts.
+
+- Weiler-Atherton needs the polygon's interior on the same side of all its
+  edges. The eta fork bridges holes to their outer boundary but runs them in
+  the same direction as it (a bridged ring's signed area is the outer's plus
+  the hole's), so `_orient_loops()` first decomposes each shape into the
+  properly nested loops between its repeated vertices and reverses the ones
+  that run the wrong way. This keeps every edge, so the shape is unchanged
+  under the even-odd rule
+- Where the tile's border cuts a zero-width seam, an exit and an entry share
+  the same point. They are ordered as in the polygon shrunk by an infinitesimal
+  amount, which keeps a hole inside the tile a hole of the part that surrounds
+  it
+- Shapes that cross themselves cannot be split: when the parts' total area
+  differs from the Sutherland-Hodgman clipping's, the shape keeps the joined
+  clipping
+
+Tested against even-odd containment on random star polygons and on 18,000
+random tiles of masks with holes and one-pixel-thin parts, in both modes.
 
 Edges use the same tolerance as the tiles view's label filtering, so float
 rounding never keeps a sliver or drops a label that touches an edge. Polygon
@@ -80,9 +107,14 @@ Tested round trips: YOLOv5 (boxes, polygons, `use_masks=True`, splits), COCO
 (boxes), ImageDirectory. Notes for the others:
 
 - **YOLOv4/v5**: pass `classes` when exporting splits; tiles may leave a split
-  without some classes, which would otherwise change the class indices. Empty
-  tiles become empty label files (background images); filter the tiles view to
-  drop or subsample them
+  without some classes, which would otherwise change the class indices.
+  `export(empty_tiles=...)` decides what happens to tiles without labels in
+  `label_field` (none of their image's labels touch them, or clipping removed
+  them all): `"keep"` (default) exports them as images with empty label files,
+  `"skip"` leaves them out. Ultralytics (YOLOv5 7.0 and 8.4) trains on images
+  with an empty label file and on images without one alike, as backgrounds, so
+  skipping is the only way to leave them out. The export logs how many empty
+  tiles it exported or skipped
 - **COCO**: cropped instance masks become polygons through the eta fork's
   hole-aware conversion; NaN keypoints are written as `(0, 0, 0)`
 - **VOC, KITTI**: their `truncated` attributes are written as stored, not

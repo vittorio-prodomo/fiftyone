@@ -156,6 +156,14 @@ tile (optional `min_label_coverage`), and keeps tags on the tiles only.
     tests for the formats other than YOLOv5 and COCO boxes, updating VOC/KITTI
     `truncated` for clipped boxes, CVAT's crash on NaN keypoints, and an
     "Export tiles" operator in the tiles plugin.
-4.  **Tags**: tags set on tiles stay local to the tiles view. Decide whether
+4.  **Hole direction in the eta fork's bridged polygons**: `_bridge_holes()` in
+    `eta/core/image.py` runs each hole in the same direction as its outer
+    boundary (a ring's signed area is the outer's plus the hole's). Filling
+    with the even-odd rule leaves the hole empty, but filling with the nonzero
+    rule fills it. Check how the App draws filled polylines (canvas `fill()`
+    defaults to nonzero) and how COCO/YOLO tools rasterize them, and consider
+    running holes the other way, as the tiles clipping does (`_orient_loops()`
+    in `fiftyone/utils/tiles.py`).
+5.  **Tags**: tags set on tiles stay local to the tiles view. Decide whether
     they should sync back to the source samples or labels once there is a use
     case.

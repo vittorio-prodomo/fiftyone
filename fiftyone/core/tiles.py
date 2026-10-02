@@ -97,7 +97,10 @@ class TilesView(fop.PatchesView):
 
         Takes the same arguments as
         :meth:`fiftyone.core.collections.SampleCollection.export`, except
-        that ``export_media`` can only be ``True`` or ``"move"``. See
+        that ``export_media`` can only be ``True`` or ``"move"``, plus
+        ``empty_tiles``, which decides whether tiles without labels are
+        exported (``"keep"``) or left out (``"skip"``), and
+        ``join_polygon_parts``. See
         :meth:`fiftyone.utils.tiles.export_tiles` for details.
 
         Examples::
@@ -113,6 +116,7 @@ class TilesView(fop.PatchesView):
                 export_dir="/tmp/quickstart-yolo",
                 dataset_type=fo.types.YOLOv5Dataset,
                 label_field="ground_truth",
+                empty_tiles="skip",
             )
         """
         import fiftyone.utils.tiles as fout

@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 import fiftyone as fo
+from fiftyone import ViewField as F
 import fiftyone.core.tiles as fot
 import fiftyone.utils.tiles as fout
 import fiftyone.utils.yolo as fouy
@@ -186,8 +187,8 @@ class ClipLabelTests(unittest.TestCase):
         self.assertAlmostEqual(_area(clipped.points[0]), 0.25 * (1 / 3))
         self.assertTrue(clipped.closed and clipped.filled)
 
-        # a U that the tile cuts into two parts stays one polygon, joined
-        # along the tile's border
+        # a U whose arms are 100px wide, which the tile (y < 400px) cuts into
+        # its two arms
         u_shape = [
             (0.45, 0.1),
             (0.55, 0.1),
@@ -198,12 +199,22 @@ class ClipLabelTests(unittest.TestCase):
             (0.75, 0.98),
             (0.45, 0.98),
         ]
-        clipped = self._clip(fo.Polyline(points=[u_shape], filled=True))
-        self.assertEqual(len(clipped.points), 1)
+        poly = fo.Polyline(points=[u_shape], filled=True)
 
-        # the parts inside the tile (y < 400px) are the two 100px wide arms
-        arm = 0.25 * 1.0
-        self.assertAlmostEqual(_area(clipped.points[0]), 2 * arm)
+        # by default, one shape per arm
+        clipped = self._clip(poly)
+        self.assertEqual(len(clipped.points), 2)
+        self.assertEqual(
+            sorted(round(_area(shape), 9) for shape in clipped.points),
+            [0.25, 0.25],
+        )
+        xs = sorted(min(x for x, _ in shape) for shape in clipped.points)
+        np.testing.assert_allclose(xs, [0.125, 0.625])
+
+        # or one shape, whose arms are joined along the tile's border
+        clipped = self._clip(poly, join_polygon_parts=True)
+        self.assertEqual(len(clipped.points), 1)
+        self.assertAlmostEqual(_area(clipped.points[0]), 0.5)
 
         # outside
         outside = [(0, 0), (0.1, 0), (0.1, 0.1)]
@@ -211,37 +222,151 @@ class ClipLabelTests(unittest.TestCase):
             self._clip(fo.Polyline(points=[outside], filled=True))
         )
 
+        # containing the tile
+        around = [(0, 0), (1, 0), (1, 1), (0, 1)]
+        clipped = self._clip(fo.Polyline(points=[around], filled=True))
+        self.assertEqual(len(clipped.points), 1)
+        self.assertAlmostEqual(_area(clipped.points[0]), 1)
+
+    def _assert_same_inside(self, src_shapes, clipped, frame_size, tile):
+        """Checks, on a grid of points of the tile, that the clipped shapes
+        cover the same points as the source shapes, and that split parts do
+        not overlap.
+        """
+        img_w, img_h = frame_size
+        tile_x, tile_y, tile_w, tile_h = tile
+        src_px = [[(x * img_w, y * img_h) for x, y in s] for s in src_shapes]
+        for i in range(20):
+            for j in range(20):
+                # grid points that avoid the polygons' edges
+                px = tile_x + (i + 0.5137) * tile_w / 20
+                py = tile_y + (j + 0.4721) * tile_h / 20
+                expected = any(_inside((px, py), s) for s in src_px)
+
+                point = ((px - tile_x) / tile_w, (py - tile_y) / tile_h)
+                shapes = clipped.points if clipped is not None else []
+                num = sum(_inside(point, s) for s in shapes)
+                self.assertEqual(num > 0, expected, msg=(i, j))
+                self.assertLessEqual(num, 1, msg=(i, j))
+
     def test_random_polygons_keep_their_inside(self):
         rng = random.Random(0)
-        tile_x, tile_y, tile_w, tile_h = self.TILE
-        for _ in range(100):
-            # a random star-shaped polygon, which is simple
+        for _ in range(200):
+            # a random star-shaped polygon whose angular gaps are below 180
+            # degrees, which makes it simple
             cx, cy = rng.uniform(0.2, 0.8), rng.uniform(0.2, 0.8)
             num = rng.randint(3, 12)
-            angles = sorted(rng.uniform(0, 2 * math.pi) for _ in range(num))
-            radii = [rng.uniform(0.05, 0.5) for _ in range(num)]
+            angles = [
+                2 * math.pi * (k + rng.uniform(0, 0.9)) / num
+                for k in range(num)
+            ]
             points = [
                 (cx + r * math.cos(a), cy + r * math.sin(a))
-                for a, r in zip(angles, radii)
+                for a, r in ((a, rng.uniform(0.05, 0.5)) for a in angles)
             ]
 
-            clipped = self._clip(fo.Polyline(points=[points], filled=True))
+            for join in (False, True):
+                clipped = self._clip(
+                    fo.Polyline(points=[points], filled=True),
+                    join_polygon_parts=join,
+                )
+                if join and clipped is not None:
+                    self.assertEqual(len(clipped.points), 1)
 
-            src_px = [(x * 1000, y * 500) for x, y in points]
-            for i in range(20):
-                for j in range(20):
-                    # grid points that avoid the polygons' edges
-                    px = tile_x + (i + 0.5137) * tile_w / 20
-                    py = tile_y + (j + 0.4721) * tile_h / 20
-                    expected = _inside((px, py), src_px)
+                self._assert_same_inside(
+                    [points], clipped, self.SIZE, self.TILE
+                )
 
-                    if clipped is None:
-                        self.assertFalse(expected)
-                        continue
+    def test_polygons_with_bridged_holes(self):
+        # Masks become polygons whose holes are bridged to their outer
+        # boundary (by the eta fork, which runs them along it), and whose
+        # thin parts visit the same vertices twice
+        rng = np.random.default_rng(0)
+        ys, xs = np.mgrid[0:200, 0:200]
+        for _ in range(40):
+            mask = np.zeros((200, 200), bool)
+            for _ in range(rng.integers(1, 6)):
+                cx, cy = rng.uniform(20, 180, 2)
+                r_out = rng.uniform(15, 70)
+                r_in = rng.uniform(3, max(4, r_out - 6))
+                d = np.hypot(xs - cx, ys - cy)
+                mask |= (d < r_out) & (d > r_in)
 
-                    point = ((px - tile_x) / tile_w, (py - tile_y) / tile_h)
-                    actual = any(_inside(point, s) for s in clipped.points)
-                    self.assertEqual(actual, expected, msg=(points, i, j))
+            cut = rng.uniform(0, 200, 2)
+            mask &= np.hypot(xs - cut[0], ys - cut[1]) >= rng.uniform(5, 25)
+
+            poly = fo.Polyline.from_mask(
+                mask, label="m", tolerance=int(rng.integers(0, 3))
+            )
+            for _ in range(5):
+                x, y = (int(v) for v in rng.integers(0, 180, 2))
+                w, h = (
+                    int(v) for v in rng.integers(5, 200 - max(x, y) + 1, 2)
+                )
+                for join in (False, True):
+                    clipped = fout.clip_label(
+                        poly, (x, y, w, h), (200, 200), join_polygon_parts=join
+                    )
+                    self._assert_same_inside(
+                        poly.points, clipped, (200, 200), (x, y, w, h)
+                    )
+
+    def test_hole_whose_seam_crosses_the_tile_border(self):
+        # a 20-180px square with a 80-120px square hole, bridged by a seam
+        # at y=100, inside a tile at 50-150 x 60-140 that cuts the seam
+        hole = [(80, 100), (80, 80), (120, 80), (120, 120), (80, 120)]
+        for hole_points in (hole, hole[:1] + hole[:0:-1]):
+            ring = [(20, 20), (180, 20), (180, 180), (20, 180), (20, 100)]
+            ring += hole_points + [(80, 100), (20, 100)]
+            poly = fo.Polyline(
+                points=[[(x / 200, y / 200) for x, y in ring]], filled=True
+            )
+
+            tile = (50, 60, 100, 80)
+            clipped = fout.clip_label(poly, tile, (200, 200))
+
+            # the tile minus the hole, in one part
+            self.assertEqual(len(clipped.points), 1)
+            area = _area(clipped.points[0]) * 100 * 80
+            self.assertAlmostEqual(area, 100 * 80 - 40 * 40)
+            self._assert_same_inside(poly.points, clipped, (200, 200), tile)
+
+            # as split, rather than through the fallback to joining
+            parts = fout._clip_polygon_parts(
+                fout._orient_loops(ring), (50, 60, 150, 140), 1e-7
+            )
+            self.assertEqual(len(parts), 1)
+            self.assertAlmostEqual(_area(parts[0]), 100 * 80 - 40 * 40)
+
+    def test_self_intersecting_polygons(self):
+        # a bow tie keeps the points of its lobes
+        bow_tie = [(0.3, 0.2), (0.7, 0.8), (0.7, 0.2), (0.3, 0.8)]
+        for join in (False, True):
+            clipped = self._clip(
+                fo.Polyline(points=[bow_tie], filled=True),
+                join_polygon_parts=join,
+            )
+            self._assert_same_inside([bow_tie], clipped, self.SIZE, self.TILE)
+
+        # a polygon that crosses itself cannot be split into parts, so it is
+        # clipped as with join_polygon_parts=True
+        crossing = [
+            (0.2596, 0.6734),
+            (0.5745, 0.6759),
+            (0.4570, 0.5501),
+            (0.5786, 0.3926),
+            (0.7091, 0.2589),
+            (0.7303, 0.4137),
+            (0.8549, 0.2985),
+            (0.9000, 0.5495),
+            (1.0249, 0.6189),
+            (1.1495, 0.6546),
+        ]
+        poly = fo.Polyline(points=[crossing], filled=True)
+        self.assertEqual(
+            self._clip(poly).points,
+            self._clip(poly, join_polygon_parts=True).points,
+        )
 
     def test_polygons_inside_are_unchanged(self):
         triangle = [(0.5, 0.4), (0.6, 0.4), (0.55, 0.5)]
@@ -278,6 +403,17 @@ class ClipLabelTests(unittest.TestCase):
         self.assertTrue(
             self._clip(fo.Polyline(points=[ring], closed=True)).closed
         )
+
+        # unless another of its shapes is split, which opens the label, so
+        # the outline inside repeats its first point
+        split_ring = [(0.5, 0.4), (0.9, 0.4), (0.9, 0.6), (0.5, 0.6)]
+        clipped = self._clip(
+            fo.Polyline(points=[ring, split_ring], closed=True)
+        )
+        self.assertFalse(clipped.closed)
+        inside = clipped.points[0]
+        self.assertEqual(len(inside), 5)
+        np.testing.assert_allclose(inside[0], inside[-1])
 
     def test_keypoints(self):
         kp = fo.Keypoint(
@@ -804,6 +940,168 @@ class ExportTilesTests(_TilesDatasetTests):
             np.testing.assert_allclose(
                 sorted(widths), [100 / 600, 200 / 600], atol=atol
             )
+
+    def _u_dataset(self):
+        """A 1500x1000 image cut into 3x2 tiles of 500px, with a U-shaped
+        polygon whose bounding box covers the top middle tile, which the
+        polygon does not enter, and an image without labels.
+        """
+        u_shape = [
+            (100, 100),
+            (200, 100),
+            (200, 900),
+            (1300, 900),
+            (1300, 100),
+            (1400, 100),
+            (1400, 950),
+            (100, 950),
+        ]
+        poly = fo.Polyline(
+            label="u",
+            points=[[(x / 1500, y / 1000) for x, y in u_shape]],
+            closed=True,
+            filled=True,
+        )
+        return self._dataset(
+            {
+                "a.png": _coords_image(1500, 1000),
+                "b.png": _coords_image(1500, 1000),
+            },
+            polys=[fo.Polylines(polylines=[poly]), fo.Polylines()],
+        )
+
+    def _yolo_label_files(self, export_dir):
+        labels_dir = os.path.join(export_dir, "labels", "val")
+        rows = {}
+        for filename in os.listdir(labels_dir):
+            with open(os.path.join(labels_dir, filename)) as f:
+                rows[os.path.splitext(filename)[0]] = f.read().splitlines()
+
+        return rows
+
+    @drop_datasets
+    def test_empty_tiles(self):
+        dataset = self._u_dataset()
+        tiles = dataset.to_tiles((500, 500))
+        self.assertEqual(len(tiles), 12)
+
+        # the view keeps the polygon in the top middle tile of a.png, where
+        # clipping removes it
+        self.assertEqual(
+            tiles.match(F("polys.polylines").length() > 0).count(), 6
+        )
+
+        # kept by default, as images with an empty label file
+        export_dir = os.path.join(self.tmp, "keep")
+        with self.assertLogs("fiftyone.utils.tiles", level="INFO") as logs:
+            tiles.export(
+                export_dir,
+                dataset_type=fo.types.YOLOv5Dataset,
+                label_field="polys",
+            )
+
+        self.assertIn(
+            "Exporting 7 of 12 tile(s) without labels", logs.output[0]
+        )
+        rows = self._yolo_label_files(export_dir)
+        self.assertEqual(len(rows), 12)
+        self.assertEqual(sum(not r for r in rows.values()), 7)
+        self.assertEqual(rows["a_tile_0_1"], [])
+        self.assertEqual(
+            len(os.listdir(os.path.join(export_dir, "images", "val"))), 12
+        )
+
+        # or skipped, images and label files alike
+        export_dir = os.path.join(self.tmp, "skip")
+        with self.assertLogs("fiftyone.utils.tiles", level="INFO") as logs:
+            tiles.export(
+                export_dir,
+                dataset_type=fo.types.YOLOv5Dataset,
+                label_field="polys",
+                empty_tiles="skip",
+            )
+
+        self.assertIn("Skipping 1 tile(s)", logs.output[0])
+        rows = self._yolo_label_files(export_dir)
+        self.assertEqual(
+            sorted(rows),
+            [
+                "a_tile_0_0",
+                "a_tile_0_2",
+                "a_tile_1_0",
+                "a_tile_1_1",
+                "a_tile_1_2",
+            ],
+        )
+        self.assertTrue(all(rows.values()))
+        self.assertEqual(
+            len(os.listdir(os.path.join(export_dir, "images", "val"))), 5
+        )
+
+        for kwargs in ({"empty_tiles": "drop"}, {"empty_tiles": "skip"}):
+            with self.assertRaises(ValueError, msg=kwargs):
+                tiles.export(
+                    os.path.join(self.tmp, "bad"),
+                    dataset_type=fo.types.YOLOv5Dataset,
+                    **kwargs,
+                )
+
+    @drop_datasets
+    def test_polygon_parts(self):
+        dataset = self._u_dataset()
+        tiles = dataset.to_tiles((500, 500)).match(
+            F("filepath").ends_with("a.png")
+        )
+
+        # the bottom middle tile cuts the U's bar off its arms: the bar is
+        # one part, but each side tile holds an arm and part of the bar
+        export_dir = os.path.join(self.tmp, "split")
+        tiles.export(
+            export_dir,
+            dataset_type=fo.types.YOLOv5Dataset,
+            label_field="polys",
+        )
+        rows = self._yolo_label_files(export_dir)
+        self.assertEqual(len(rows["a_tile_1_1"]), 1)
+
+        # the top tiles of the arms each hold one arm
+        self.assertEqual(len(rows["a_tile_0_0"]), 1)
+
+        # a 1500x500 crop of the U's top, as one tile, cuts it into its two
+        # arms: one shape, or row, per arm by default
+        tall = dataset.to_tiles((1500, 500)).match(
+            F("filepath").ends_with("a.png")
+        )
+        export_dir = os.path.join(self.tmp, "arms")
+        tall.export(
+            export_dir,
+            dataset_type=fo.types.YOLOv5Dataset,
+            label_field="polys",
+        )
+        self.assertEqual(
+            len(self._yolo_label_files(export_dir)["a_tile_0_0"]), 2
+        )
+
+        export_dir = os.path.join(self.tmp, "joined")
+        tall.export(
+            export_dir,
+            dataset_type=fo.types.YOLOv5Dataset,
+            label_field="polys",
+            join_polygon_parts=True,
+        )
+        self.assertEqual(
+            len(self._yolo_label_files(export_dir)["a_tile_0_0"]), 1
+        )
+
+        # materialize() takes the same option
+        shapes = tall.materialize(os.path.join(self.tmp, "m1")).values(
+            "polys.polylines.points"
+        )
+        self.assertEqual(len(shapes[0][0]), 2)
+        shapes = tall.materialize(
+            os.path.join(self.tmp, "m2"), join_polygon_parts=True
+        ).values("polys.polylines.points")
+        self.assertEqual(len(shapes[0][0]), 1)
 
     @drop_datasets
     def test_any_format(self):
