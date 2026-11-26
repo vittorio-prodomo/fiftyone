@@ -364,20 +364,14 @@ class TestMongoChangeStreamNotificationServiceAsync:
         self, notification_service
     ):
         service, collection, remote_notifier = notification_service
+        updated_at = _start_polling_before_changes(service)
         docs = _mock_store_collection(collection)
-
-        # The first poll only records the high-water mark and the keys
-        await service._poll()
-
-        await asyncio.sleep(0.002)
-        updated_at = datetime.datetime.now(datetime.timezone.utc)
         docs.extend(
             [
                 _store_doc("bad", {"x": 1}, updated_at),
                 _store_doc("good", "ok", updated_at),
             ]
         )
-        await asyncio.sleep(0.002)
 
         notified = []
 
@@ -398,7 +392,6 @@ class TestMongoChangeStreamNotificationServiceAsync:
         # water mark moves past both, and the next poll re-notifies neither
         assert notified == ["bad", "good"]
         assert last_poll_time > updated_at
-        assert service._last_poll_time > last_poll_time
 
         # One short warning that names the document, without a traceback
         logger.exception.assert_not_called()
@@ -412,14 +405,10 @@ class TestMongoChangeStreamNotificationServiceAsync:
     @pytest.mark.asyncio
     async def test_poll_notifies_bson_values(self, notification_service):
         service, collection, remote_notifier = notification_service
-        docs = _mock_store_collection(collection)
         callback = MagicMock()
         service.subscribe("test_store", callback)
-
-        await service._poll()
-
-        await asyncio.sleep(0.002)
-        updated_at = datetime.datetime.now(datetime.timezone.utc)
+        updated_at = _start_polling_before_changes(service)
+        docs = _mock_store_collection(collection)
         oid = ObjectId()
         docs.extend(
             [
@@ -434,7 +423,6 @@ class TestMongoChangeStreamNotificationServiceAsync:
                 _store_doc("plain", 1, updated_at),
             ]
         )
-        await asyncio.sleep(0.002)
 
         await service._poll()
         await asyncio.gather(*service._background_tasks)
@@ -516,6 +504,19 @@ class TestMessageData(unittest.TestCase):
                 key="key", value=value, metadata=MessageMetadata()
             )
             self.assertEqual(json.loads(message.to_json())["value"], expected)
+
+
+def _start_polling_before_changes(service):
+    """Puts the service in the state of a first poll made two minutes ago,
+    and returns a time of change between that poll and the next one.
+
+    Fixed past times keep the order of the polls and the changes independent
+    of the clock's resolution.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    service._last_poll_time = now - datetime.timedelta(minutes=2)
+    service._last_keys = {}
+    return now - datetime.timedelta(minutes=1)
 
 
 def _store_doc(key, value, updated_at, store_name="test_store"):
