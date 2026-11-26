@@ -21,8 +21,8 @@ linked PR threads.
 
 ## Upstream contributions
 
-Bugs found in upstream code during the sync. The forks carry upstream's code
-unchanged for all of them except the first.
+Bugs found in upstream code during the sync, and later. The forks fix or work
+around items 1, 7, 8 and 9, and carry upstream's code unchanged for the others.
 
 ### 1. Conversion stages fail to rebuild after an expression stage (fiftyone)
 
