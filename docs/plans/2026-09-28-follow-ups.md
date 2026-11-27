@@ -21,8 +21,8 @@ linked PR threads.
 
 ## Upstream contributions
 
-Bugs found in upstream code during the sync. The forks carry upstream's code
-unchanged for all of them except the first.
+Bugs found in upstream code during the sync, and later. The forks fix or work
+around items 1, 7, 8 and 9, and carry upstream's code unchanged for the others.
 
 ### 1. Conversion stages fail to rebuild after an expression stage (fiftyone)
 
@@ -130,6 +130,30 @@ unchanged for all of them except the first.
   It broke the `test-windows` jobs on every PR into `main`.
 - **Next step**: decide whether to report it upstream (to fiftyone, strawberry,
   or both)
+
+### 9. Execution store polling loops on a value it cannot serialize (fiftyone)
+
+- **Status**: fixed in this fork (branch `fix/store-notification-poll-loop`).
+  Upstream `main` fixed the serialization half in #8700 (3b56155d, October
+  2026); its poller still loops on any change that fails to notify
+- **Bug**: on a MongoDB that is not a replica set, the App's execution store
+  notification service falls back to polling every 5 seconds. `_poll()`
+  notifies each changed store document, and `notify()` serializes it with
+  `MessageData.to_json()` (plain `json.dumps()`), which raises
+  `TypeError: Object of type datetime is not JSON serializable` for a value
+  with a BSON date (or an ObjectId). The error escaped `_poll()` before it
+  moved its high-water mark, so every poll re-notified the same document, never
+  delivered the changes after it, and logged a traceback of about 80 lines,
+  chained with the change stream's `OperationFailure` because polling ran
+  inside `_run()`'s `except` block. On the lab machine this was about 57,000
+  journal lines an hour (99 % of the journal) until a restart, in October and
+  November 2026
+- **Fix**: `to_json()` encodes values with `fiftyone.core.json.stringify()`
+  (upstream's change, ported as is); `_poll()` logs a change that fails to
+  notify once, as a warning without a traceback, skips it, and still moves its
+  high-water mark; polling runs outside the `except` block; tests in
+  `tests/unittests/operators/notification_service_tests.py`
+- **Next step**: open an upstream PR with the polling half and its tests
 
 ## Tiles follow-ups
 

@@ -279,12 +279,15 @@ class MongoChangeStreamNotificationService(ChangeStreamNotificationService):
         try:
             # First attempt to use change streams
             await self._run_change_stream()
+            return
         except OperationFailure:
             logger.warning(
                 f"Mongo change stream is not available. Falling back to polling."
             )
-            # Try polling as a fallback for any error
-            await self._start_polling()
+
+        # Poll outside of the except block, so that the errors logged while
+        # polling do not chain the change stream's failure
+        await self._start_polling()
 
     async def _run_change_stream(self) -> None:
         """Run the change stream watcher."""
@@ -525,7 +528,7 @@ class MongoChangeStreamNotificationService(ChangeStreamNotificationService):
                         timestamp=datetime.now(timezone.utc).isoformat(),
                     ),
                 )
-                await self.notify(store_name, message_data)
+                await self._notify_polled_change(store_name, message_data)
 
             # Detect inserts and updates
             query = {
@@ -553,10 +556,34 @@ class MongoChangeStreamNotificationService(ChangeStreamNotificationService):
                         timestamp=datetime.now(timezone.utc).isoformat(),
                     ),
                 )
-                await self.notify(store_name, message_data)
+                await self._notify_polled_change(store_name, message_data)
 
             self._last_keys[store_name] = current_keys
         self._last_poll_time = now
+
+    async def _notify_polled_change(
+        self, store_name: str, message_data: MessageData
+    ) -> None:
+        """Notify subscribers of a change found by polling.
+
+        A change that fails to notify is logged once and skipped, so that it
+        cannot stop the poll from reaching the following changes and moving
+        its high-water mark past them all.
+
+        Args:
+            store_name: The name of the store that changed
+            message_data: The message data to notify subscribers with
+        """
+        try:
+            await self.notify(store_name, message_data)
+        except Exception as e:
+            logger.warning(
+                "Failed to notify subscribers of a change to key '%s' of "
+                "store '%s'; skipping it: %s",
+                message_data.key,
+                store_name,
+                e,
+            )
 
 
 class MongoChangeStreamNotificationServiceLifecycleManager:

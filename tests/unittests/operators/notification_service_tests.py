@@ -8,9 +8,11 @@ Unit tests for the notification service.
 
 import asyncio
 import datetime
+import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from bson import Decimal128, ObjectId
 import pytest
 from pymongo.errors import OperationFailure
 
@@ -42,6 +44,21 @@ class TestMongoChangeStreamNotificationService(unittest.TestCase):
 
     def tearDown(self):
         self.loop.close()
+
+    def test_notifications_serialize_nested_job_dates_without_mutation(self):
+        requested_at = datetime.datetime(2026, 1, 1)
+        job = {"progress": {"requested_at": requested_at}}
+        message = MessageData(key="job", value=job, metadata=MessageMetadata())
+        self.loop.run_until_complete(
+            self.notification_service.notify("selection_jobs", message)
+        )
+        self.loop.run_until_complete(asyncio.sleep(0))
+        store, payload = self.remote_notifier.broadcast_to_store.call_args.args
+        self.assertEqual(store, "selection_jobs")
+        value = json.loads(payload)["value"]["progress"]["requested_at"]
+        self.assertEqual(value["_cls"], "DateTime")
+        self.assertEqual(value["datetime"], 1767225600000)
+        self.assertIs(job["progress"]["requested_at"], requested_at)
 
     def test_subscribe(self):
         callback = MagicMock()
@@ -341,3 +358,202 @@ class TestMongoChangeStreamNotificationServiceAsync:
             # Verify _last_poll_time was updated
             assert service._last_poll_time is not None
             assert service._last_poll_time != last_poll_time
+
+    @pytest.mark.asyncio
+    async def test_poll_skips_a_document_that_fails_to_notify(
+        self, notification_service
+    ):
+        service, collection, remote_notifier = notification_service
+        updated_at = _start_polling_before_changes(service)
+        docs = _mock_store_collection(collection)
+        docs.extend(
+            [
+                _store_doc("bad", {"x": 1}, updated_at),
+                _store_doc("good", "ok", updated_at),
+            ]
+        )
+
+        notified = []
+
+        async def notify(store_name, message_data):
+            notified.append(message_data.key)
+            if message_data.key == "bad":
+                raise TypeError("Object is not JSON serializable")
+
+        logger_path = "fiftyone.operators.store.notification_service.logger"
+        with patch.object(service, "notify", side_effect=notify), patch(
+            logger_path
+        ) as logger:
+            await service._poll()
+            last_poll_time = service._last_poll_time
+            await service._poll()
+
+        # The document after the failing one is still delivered, the high-
+        # water mark moves past both, and the next poll re-notifies neither
+        assert notified == ["bad", "good"]
+        assert last_poll_time > updated_at
+
+        # One short warning that names the document, without a traceback
+        logger.exception.assert_not_called()
+        assert logger.warning.call_count == 1
+        args, kwargs = logger.warning.call_args
+        message = args[0] % args[1:]
+        assert "test_store" in message and "bad" in message
+        assert "Object is not JSON serializable" in message
+        assert "exc_info" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_poll_notifies_bson_values(self, notification_service):
+        service, collection, remote_notifier = notification_service
+        callback = MagicMock()
+        service.subscribe("test_store", callback)
+        updated_at = _start_polling_before_changes(service)
+        docs = _mock_store_collection(collection)
+        oid = ObjectId()
+        docs.extend(
+            [
+                _store_doc(
+                    "dated",
+                    {"at": datetime.datetime(2026, 1, 1), "id": oid},
+                    updated_at,
+                ),
+                # BSON types that JSON cannot encode still fail, but only
+                # their own notification
+                _store_doc("decimal", Decimal128("1.5"), updated_at),
+                _store_doc("plain", 1, updated_at),
+            ]
+        )
+
+        await service._poll()
+        await asyncio.gather(*service._background_tasks)
+        await service._poll()
+        await asyncio.gather(*service._background_tasks)
+
+        # Local subscribers receive every document once
+        keys = [c.args[0].key for c in callback.call_args_list]
+        assert keys == ["dated", "decimal", "plain"]
+
+        # Remote listeners receive the values that JSON can encode, once
+        payloads = {}
+        for c in remote_notifier.broadcast_to_store.call_args_list:
+            store_name, payload = c.args
+            assert store_name == "test_store"
+            data = json.loads(payload)
+            assert data["key"] not in payloads
+            payloads[data["key"]] = data["value"]
+
+        assert sorted(payloads) == ["dated", "plain"]
+        assert payloads["dated"] == {
+            "at": {"_cls": "DateTime", "datetime": 1767225600000},
+            "id": str(oid),
+        }
+        assert payloads["plain"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_falls_back_to_polling_outside_the_except_block(
+        self, notification_service
+    ):
+        service, collection, remote_notifier = notification_service
+
+        with patch.object(
+            service,
+            "_run_change_stream",
+            side_effect=OperationFailure("Change stream not available"),
+        ), patch.object(
+            service, "_start_polling", side_effect=ValueError("poll failed")
+        ):
+            with pytest.raises(ValueError) as e:
+                await service._run()
+
+        # Errors raised while polling must not chain the change stream's
+        # failure, which would double the tracebacks that polling logs
+        assert e.value.__context__ is None
+
+
+class TestMessageData(unittest.TestCase):
+    def test_to_json_encodes_bson_values(self):
+        oid = ObjectId()
+        dt = datetime.datetime(2026, 1, 1, 12, 30)
+        value = {"at": dt, "ids": [oid], "nested": {"at": dt}}
+        message = MessageData(
+            key="key", value=value, metadata=MessageMetadata()
+        )
+
+        data = json.loads(message.to_json())
+
+        dt_json = {"_cls": "DateTime", "datetime": 1767270600000}
+        self.assertEqual(
+            data["value"],
+            {"at": dt_json, "ids": [str(oid)], "nested": {"at": dt_json}},
+        )
+
+        # The message's own value is left as is
+        self.assertIs(message.value["at"], dt)
+        self.assertIs(message.value["ids"][0], oid)
+
+    def test_to_json_encodes_bson_scalar_values(self):
+        oid = ObjectId()
+        for value, expected in (
+            (oid, str(oid)),
+            (
+                datetime.datetime(2026, 1, 1),
+                {"_cls": "DateTime", "datetime": 1767225600000},
+            ),
+        ):
+            message = MessageData(
+                key="key", value=value, metadata=MessageMetadata()
+            )
+            self.assertEqual(json.loads(message.to_json())["value"], expected)
+
+
+def _start_polling_before_changes(service):
+    """Puts the service in the state of a first poll made two minutes ago,
+    and returns a time of change between that poll and the next one.
+
+    Fixed past times keep the order of the polls and the changes independent
+    of the clock's resolution.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    service._last_poll_time = now - datetime.timedelta(minutes=2)
+    service._last_keys = {}
+    return now - datetime.timedelta(minutes=1)
+
+
+def _store_doc(key, value, updated_at, store_name="test_store"):
+    return {
+        "store_name": store_name,
+        "key": key,
+        "value": value,
+        "updated_at": updated_at,
+    }
+
+
+def _mock_store_collection(collection):
+    """Makes a mock execution store collection answer the poller's queries
+    from a list of documents, which the caller fills.
+    """
+    docs = []
+
+    def _matches(doc, query):
+        for field, condition in (query or {}).items():
+            if isinstance(condition, dict):
+                if not doc[field] > condition["$gt"]:
+                    return False
+            elif doc[field] != condition:
+                return False
+
+        return True
+
+    async def distinct(field, query=None):
+        return sorted({d[field] for d in docs if _matches(d, query)})
+
+    def find(query):
+        cursor = MagicMock()
+        cursor.to_list = AsyncMock(
+            return_value=[d for d in docs if _matches(d, query)]
+        )
+        return cursor
+
+    collection.distinct = AsyncMock(side_effect=distinct)
+    collection.find = MagicMock(side_effect=find)
+    return docs
